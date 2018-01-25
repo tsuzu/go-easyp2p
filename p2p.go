@@ -14,7 +14,7 @@ import (
 
 type P2PConn struct {
 	udp     *net.UDPConn
-	utpConn net.Conn
+	UTPConn net.Conn
 
 	IPDiscoveryServers []string
 	IPDiscoveryTimeout int // second(s). zero: no limit
@@ -24,7 +24,7 @@ type P2PConn struct {
 func NewP2PConn(ipDiscoveryServers []string) *P2PConn {
 	return &P2PConn{
 		IPDiscoveryServers: ipDiscoveryServers,
-		IPDiscoveryTimeout: 10,
+		IPDiscoveryTimeout: 4,
 	}
 }
 
@@ -71,6 +71,7 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 
 			continue
 		}
+		defer s.Close()
 
 		addr, err := func() (string, error) {
 			defer c.Close()
@@ -120,7 +121,7 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 	if err != nil {
 		retErr = append(retErr, err.Error())
 	} else {
-		port := strings.TrimPrefix(conn.udp.LocalAddr().String(), "0.0.0.0")
+		port := strings.TrimPrefix(conn.udp.LocalAddr().String(), "[::]")
 
 		for i := range ifaces {
 			a, err := ifaces[i].Addrs()
@@ -132,13 +133,21 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 			}
 
 			for i := range a {
-				addrs[a[i].String()+port] = struct{}{}
-				leastOne = true
+				addr, ok := a[i].(*net.IPNet)
+
+				if ok {
+					switch {
+					case addr.IP.To4() != nil:
+						addrs[addr.IP.String()+port] = struct{}{}
+						leastOne = true
+					case addr.IP.To16() != nil:
+					}
+				}
 			}
 		}
 	}
 
-	strs := make([]string, len(addrs))
+	strs := make([]string, 0, len(addrs))
 	for k := range addrs {
 		strs = append(strs, k)
 	}
@@ -154,7 +163,7 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 }
 
 func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
-	sock, err := utp.NewSocketFromPacketConnNoClose(conn.udp)
+	sock, err := utp.NewSocketFromPacketConnNoClose(&PacketConnIgnoreOK{conn.udp})
 
 	if err != nil {
 		return err
@@ -175,44 +184,66 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 			}
 		}()
 
-		for {
-			accepted, err := sock.Accept()
+		finCh := make(chan struct{})
+		go func() {
+			for {
+				accepted, err := sock.Accept()
 
-			if err != nil {
-				continue
-			}
-
-			found := false
-			for i := range destAddrs {
-				if destAddrs[i] == accepted.RemoteAddr().String() {
-					found = true
-					break
+				select {
+				case <-finCh:
+					if accepted != nil {
+						accepted.Close()
+					}
+					return
+				default:
 				}
+
+				if err != nil {
+
+					continue
+				}
+
+				go func() {
+					found := false
+					for i := range destAddrs {
+						if destAddrs[i] == accepted.RemoteAddr().String() {
+							found = true
+							break
+						}
+					}
+
+					if !found {
+						accepted.Close()
+
+						return
+					}
+
+					accepted.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+					b := make([]byte, 1024)
+					n, err := accepted.Read(b)
+
+					if err != nil {
+						accepted.Close()
+
+						return
+					}
+
+					b = b[:n]
+
+					if string(b) == "OK" {
+						conn.UTPConn = accepted
+
+						close(finCh)
+					}
+
+				}()
 			}
+		}()
 
-			if !found {
-				accepted.Close()
+		<-finCh
 
-				continue
-			}
-
-			b := make([]byte, 1024)
-			n, err := accepted.Read(b)
-
-			if err != nil {
-				accepted.Close()
-
-				continue
-			}
-
-			b = b[:n]
-
-			if string(b) == "OK" {
-				conn.utpConn = accepted
-
-				break
-			}
-		}
+		sock.Close()
 
 		return nil
 	} else {
@@ -230,12 +261,14 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 					cancel()
 				}()
 				defer cancel()
+			FINISH_TRYING:
 				for {
 					ok := func() bool {
-						ctx, cancel := context.WithTimeout(pctx, 3*time.Second)
+						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
 						defer cancel()
 
-						conn, err := sock.DialContext(ctx, daddr)
+						ctx.Deadline()
+						conn, err := sock.Dial(daddr)
 
 						if err != nil {
 							return false
@@ -256,6 +289,11 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 					if ok {
 						break
 					}
+					select {
+					case <-finCh:
+						break FINISH_TRYING
+					default:
+					}
 				}
 			}(destAddrs[i])
 		}
@@ -267,8 +305,29 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 			return err
 		}
 
-		conn.utpConn = connectedConn
+		conn.UTPConn = connectedConn
 
 		return nil
 	}
+}
+
+func (conn *P2PConn) Read(b []byte) (int, error) {
+	if conn.UTPConn == nil {
+		return 0, ErrNotConnected
+	}
+
+	return conn.UTPConn.Read(b)
+}
+
+func (conn *P2PConn) Write(b []byte) (int, error) {
+	if conn.UTPConn == nil {
+		return 0, ErrNotConnected
+	}
+
+	return conn.UTPConn.Write(b)
+}
+
+func (conn *P2PConn) Close() error {
+	conn.UTPConn.Close()
+	return conn.udp.Close()
 }
