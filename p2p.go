@@ -3,7 +3,6 @@ package easyp2p
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -17,14 +16,15 @@ type P2PConn struct {
 	UTPConn net.Conn
 
 	IPDiscoveryServers []string
-	IPDiscoveryTimeout int // second(s). zero: no limit
 	LocalAddresses     []string
+
+	discoverIPFunc DiscoverIPFunc
 }
 
-func NewP2PConn(ipDiscoveryServers []string) *P2PConn {
+func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFunc) *P2PConn {
 	return &P2PConn{
 		IPDiscoveryServers: ipDiscoveryServers,
-		IPDiscoveryTimeout: 4,
+		discoverIPFunc:     discoverIP,
 	}
 }
 
@@ -53,67 +53,22 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 	leastOne := false
 
 	addrs := make(map[string]struct{})
-	for i := range conn.IPDiscoveryServers {
-		server := conn.IPDiscoveryServers[i]
 
-		s, err := utp.NewSocketFromPacketConnNoClose(conn.udp)
+	if conn.discoverIPFunc != nil {
+		for i := range conn.IPDiscoveryServers {
+			server := conn.IPDiscoveryServers[i]
 
-		if err != nil {
-			retErr = append(retErr, err.Error())
-
-			continue
-		}
-
-		c, err := s.Dial(server)
-
-		if err != nil {
-			retErr = append(retErr, err.Error())
-
-			continue
-		}
-		defer s.Close()
-
-		addr, err := func() (string, error) {
-			defer c.Close()
-			if t := conn.IPDiscoveryTimeout; t != 0 {
-				c.SetDeadline(time.Now().Add(time.Duration(t) * time.Second))
-			}
-
-			c.Write([]byte(fmt.Sprintf("%s %s", IPDiscoveryRequestHeader, IPDiscoveryVersion)))
-
-			b := make([]byte, 1024)
-			n, err := c.Read(b)
+			addr, err := conn.discoverIPFunc(server, conn.udp)
 
 			if err != nil {
-				return "", err
+				retErr = append(retErr, err.Error())
+
+				continue
 			}
 
-			b = b[:n]
-
-			arr := strings.Split(string(b), " ")
-
-			if len(arr) != 2 {
-				return "", ErrUnknownProtocol
-			}
-
-			switch arr[0] {
-			case IPDiscoveryResponseHeaderOK:
-				return arr[1], nil
-			case IPDiscoveryResponseHeaderProcotolError:
-				return "", ErrUnknownProtocol
-			default:
-				return "", ErrUnknownProtocol
-			}
-		}()
-
-		if err != nil {
-			retErr = append(retErr, err.Error())
-
-			continue
+			addrs[addr] = struct{}{}
+			leastOne = true
 		}
-
-		addrs[addr] = struct{}{}
-		leastOne = true
 	}
 
 	ifaces, err := net.Interfaces()
@@ -174,11 +129,8 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 			for i := 0; i < 3; i++ {
 				for i := range destAddrs {
 					addr, err := net.ResolveUDPAddr("udp", destAddrs[i])
-
 					if err == nil {
-						if _, err := sock.WriteTo([]byte("OK"), addr); err == nil {
-							break
-						}
+						sock.WriteTo([]byte("OK"), addr)
 					}
 				}
 			}
@@ -199,7 +151,6 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 				}
 
 				if err != nil {
-
 					continue
 				}
 
@@ -220,7 +171,7 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 
 					accepted.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-					b := make([]byte, 1024)
+					b := make([]byte, 2)
 					n, err := accepted.Read(b)
 
 					if err != nil {
@@ -267,8 +218,7 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
 						defer cancel()
 
-						ctx.Deadline()
-						conn, err := sock.Dial(daddr)
+						conn, err := sock.DialContext(ctx, daddr)
 
 						if err != nil {
 							return false
@@ -328,6 +278,12 @@ func (conn *P2PConn) Write(b []byte) (int, error) {
 }
 
 func (conn *P2PConn) Close() error {
-	conn.UTPConn.Close()
-	return conn.udp.Close()
+	if conn.UTPConn != nil {
+		conn.UTPConn.Close()
+	}
+	if conn.udp != nil {
+		return conn.udp.Close()
+	}
+
+	return nil
 }
