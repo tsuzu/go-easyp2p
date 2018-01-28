@@ -181,6 +181,7 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 					}
 
 					b = b[:n]
+					accepted.SetReadDeadline(time.Time{})
 
 					if string(b) == "OK" {
 						conn.UTPConn = accepted
