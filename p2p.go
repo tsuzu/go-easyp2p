@@ -2,7 +2,11 @@ package easyp2p
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"io"
+	"io/ioutil"
 	"net"
 	"strings"
 	"sync"
@@ -17,7 +21,10 @@ type P2PConn struct {
 
 	IPDiscoveryServers []string
 	LocalAddresses     []string
+	TLSEncryption      bool
+	CertificateFunc    GetCertificateFuncType
 
+	identifier     string
 	discoverIPFunc DiscoverIPFunc
 }
 
@@ -25,6 +32,7 @@ func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFunc) *P2PConn
 	return &P2PConn{
 		IPDiscoveryServers: ipDiscoveryServers,
 		discoverIPFunc:     discoverIP,
+		TLSEncryption:      true,
 	}
 }
 
@@ -117,7 +125,12 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 	return leastOne, nil
 }
 
-func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
+func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool) error {
+	var remoteDescription Description
+	if err := json.Unmarshal([]byte(remoteDescriptionString), &remoteDescription); err != nil {
+		return err
+	}
+
 	sock, err := utp.NewSocketFromPacketConnNoClose(&PacketConnIgnoreOK{conn.udp})
 
 	if err != nil {
@@ -127,14 +140,34 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 	if asServer {
 		go func() {
 			for i := 0; i < 3; i++ {
-				for i := range destAddrs {
-					addr, err := net.ResolveUDPAddr("udp", destAddrs[i])
+				for i := range remoteDescription.LocalAddresses {
+					addr, err := net.ResolveUDPAddr("udp", remoteDescription.LocalAddresses[i])
 					if err == nil {
 						sock.WriteTo([]byte("OK"), addr)
 					}
 				}
 			}
 		}()
+
+		var config *tls.Config
+
+		if conn.TLSEncryption {
+			if conn.CertificateFunc == nil {
+				conn.CertificateFunc = NewSelfSignedCertificate
+			}
+
+			cert, err := conn.CertificateFunc()
+
+			if err != nil {
+				sock.Close()
+
+				return err
+			}
+
+			config = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+			}
+		}
 
 		finCh := make(chan struct{})
 		go func() {
@@ -155,9 +188,10 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 				}
 
 				go func() {
-					found := false
-					for i := range destAddrs {
-						if destAddrs[i] == accepted.RemoteAddr().String() {
+					//TODO: Delete checking whether address is found
+					/*found := false
+					for i := range remoteDescription.LocalAddresses {
+						if remoteDescription.LocalAddresses[i] == accepted.RemoteAddr().String() {
 							found = true
 							break
 						}
@@ -167,26 +201,96 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 						accepted.Close()
 
 						return
-					}
+					}*/
 
-					accepted.SetReadDeadline(time.Now().Add(5 * time.Second))
+					accepted.SetDeadline(time.Now().Add(5 * time.Second))
 
-					b := make([]byte, 2)
-					n, err := accepted.Read(b)
-
-					if err != nil {
+					// Send header
+					hbytes := (&P2PHeader{
+						Version:   P2PCurrentVersion,
+						Encrypted: conn.TLSEncryption,
+					}).GetBytes()
+					if _, err := accepted.Write(hbytes[:]); err != nil {
 						accepted.Close()
 
 						return
 					}
 
+					// Read header
+					if _, err := accepted.Read(hbytes[:]); err != nil {
+						accepted.Close()
+
+						return
+					}
+
+					var header *P2PHeader
+					if header, err = ParseP2PHeader(hbytes[:]); err != nil {
+						accepted.Close()
+
+						return
+					}
+					if header.Version != P2PCurrentVersion {
+						accepted.Close()
+
+						return
+					}
+					if !conn.TLSEncryption && header.Encrypted {
+						accepted.Close()
+
+						return
+					}
+
+					var newConn net.Conn
+
+					if header.Encrypted {
+						newConn = tls.Server(accepted, config)
+					} else {
+						newConn = accepted
+					}
+
+					newConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+					b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
+					if err != nil {
+						newConn.Close()
+
+						return
+					}
+					if len(b) != IdentifierLength {
+						newConn.Close()
+
+						return
+					}
+					if string(b) != conn.identifier {
+						newConn.Close()
+
+						return
+					}
+
+					if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
+						newConn.Close()
+
+						return
+					}
+
+					b = make([]byte, 2)
+					n, err := newConn.Read(b)
+
+					if err != nil {
+						newConn.Close()
+
+						return
+					}
+
 					b = b[:n]
-					accepted.SetReadDeadline(time.Time{})
+					newConn.SetDeadline(time.Time{})
 
 					if string(b) == "OK" {
-						conn.UTPConn = accepted
+						conn.UTPConn = newConn
 
 						close(finCh)
+					} else {
+						newConn.Close()
 					}
 
 				}()
@@ -202,10 +306,10 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 		finCh := make(chan struct{})
 		triggerCh := make(chan struct{})
 
-		var connectedConn net.Conn
+		var finalConencted net.Conn
 		var mut sync.Mutex
 
-		for i := range destAddrs {
+		for i := range remoteDescription.LocalAddresses {
 			go func(daddr string) {
 				pctx, cancel := context.WithCancel(context.Background())
 				go func() {
@@ -219,26 +323,96 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
 						defer cancel()
 
-						conn, err := sock.DialContext(ctx, daddr)
+						connected, err := sock.DialContext(ctx, daddr)
 
 						if err != nil {
 							return false
 						}
 
+						connected.SetDeadline(time.Now().Add(5 * time.Second))
+
+						// Read header
+						var hbytes [P2PHeaderLength]byte
+						if _, err := connected.Read(hbytes[:]); err != nil {
+							connected.Close()
+
+							return false
+						}
+
+						var header *P2PHeader
+						if header, err = ParseP2PHeader(hbytes[:]); err != nil {
+							connected.Close()
+
+							return false
+						}
+						if header.Version != P2PCurrentVersion {
+							connected.Close()
+
+							return false
+						}
+
+						encrypted := conn.TLSEncryption && header.Encrypted
+						// Send header
+						hbytes = (&P2PHeader{
+							Version:   P2PCurrentVersion,
+							Encrypted: encrypted,
+						}).GetBytes()
+						if _, err := connected.Write(hbytes[:]); err != nil {
+							connected.Close()
+
+							return false
+						}
+
+						var newConn net.Conn
+
+						if encrypted {
+							newConn = tls.Client(connected, &tls.Config{InsecureSkipVerify: true})
+						} else {
+							newConn = connected
+						}
+
+						if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
+							newConn.Close()
+
+							return false
+						}
+
+						newConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+						b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
+						if err != nil {
+							newConn.Close()
+
+							return false
+						}
+
+						if len(b) != IdentifierLength {
+							newConn.Close()
+
+							return false
+						}
+						if string(b) != conn.identifier {
+							newConn.Close()
+
+							return false
+						}
+
+						newConn.SetDeadline(time.Time{})
+
 						mut.Lock()
-						if connectedConn == nil {
-							connectedConn = conn
+						if finalConencted == nil {
+							finalConencted = newConn
 
 							triggerCh <- struct{}{}
 						} else {
-							conn.Close()
+							newConn.Close()
 						}
 						mut.Unlock()
 						return true
 					}()
 
 					if ok {
-						break
+						break FINISH_TRYING
 					}
 					select {
 					case <-finCh:
@@ -246,20 +420,35 @@ func (conn *P2PConn) Connect(destAddrs []string, asServer bool) error {
 					default:
 					}
 				}
-			}(destAddrs[i])
+			}(remoteDescription.LocalAddresses[i])
 		}
 
 		<-triggerCh
 		close(finCh)
 
-		if _, err := connectedConn.Write([]byte("OK")); err != nil {
+		if _, err := finalConencted.Write([]byte("OK")); err != nil {
 			return err
 		}
 
-		conn.UTPConn = connectedConn
+		conn.UTPConn = finalConencted
 
 		return nil
 	}
+}
+
+func (conn *P2PConn) LocalDescription() (string, error) {
+	if len(conn.LocalAddresses) == 0 {
+		return "", ErrInsufficientLocalAdrdesses
+	}
+
+	conn.identifier = RandomSecureIdentifier()
+
+	b, _ := json.Marshal(Description{
+		LocalAddresses: conn.LocalAddresses,
+		Identifier:     conn.identifier,
+	})
+
+	return string(b), nil
 }
 
 func (conn *P2PConn) Read(b []byte) (int, error) {

@@ -9,3 +9,4 @@ const IPDiscoveryResponseHeaderProcotolError = "PROTOCOL_ERROR"
 
 var ErrUnknownProtocol = errors.New("Unknown DiscoverIP Protocol")
 var ErrNotConnected = errors.New("Not connected")
+var ErrInsufficientLocalAdrdesses = errors.New("Insufficient local addresses")
