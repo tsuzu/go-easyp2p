@@ -100,6 +100,7 @@ func DiscoverIPWithSTUN(addr string, conn net.PacketConn) (string, error) {
 	return res, nil
 }
 
+// DiscoverIPSimple  You can use this with RunServer(), but this is deprecated
 func DiscoverIPSimple(addr string, conn net.PacketConn) (string, error) {
 	s, err := utp.NewSocketFromPacketConnNoClose(conn)
 

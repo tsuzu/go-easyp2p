@@ -6,4 +6,4 @@
 - Copyright (c) 2018 Tsuzu
 
 # Detail
-- Using STUN
+- Using STUN, µTP(Bit Torrent)
