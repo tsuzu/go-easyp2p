@@ -125,13 +125,26 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 	return leastOne, nil
 }
 
-func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool) error {
+func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx context.Context) error {
 	var remoteDescription Description
 	if err := json.Unmarshal([]byte(remoteDescriptionString), &remoteDescription); err != nil {
 		return err
 	}
 
-	sock, err := utp.NewSocketFromPacketConnNoClose(&PacketConnIgnoreOK{conn.udp})
+	wrapped := &PacketConnIgnoreOK{
+		PacketConn: conn.udp,
+	}
+
+	if !asServer {
+		wrapped.addrs = make(map[string]struct{})
+
+		for _, msg := range remoteDescription.LocalAddresses {
+			wrapped.addrs[msg] = struct{}{}
+		}
+		wrapped.ch = make(chan string, 1024)
+	}
+
+	sock, err := utp.NewSocketFromPacketConnNoClose(wrapped)
 
 	if err != nil {
 		return err
@@ -170,7 +183,10 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool) erro
 		}
 
 		finCh := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for {
 				accepted, err := sock.Accept()
 
@@ -187,22 +203,9 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool) erro
 					continue
 				}
 
+				wg.Add(1)
 				go func() {
-					//TODO: Delete checking whether address is found
-					/*found := false
-					for i := range remoteDescription.LocalAddresses {
-						if remoteDescription.LocalAddresses[i] == accepted.RemoteAddr().String() {
-							found = true
-							break
-						}
-					}
-
-					if !found {
-						accepted.Close()
-
-						return
-					}*/
-
+					defer wg.Done()
 					accepted.SetDeadline(time.Now().Add(5 * time.Second))
 
 					// Send header
@@ -296,10 +299,18 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool) erro
 				}()
 			}
 		}()
+		select {
+		case <-finCh:
+			sock.Close()
+		case <-ctx.Done():
+			sock.CloseNow()
+			wg.Wait()
+			if conn.UTPConn != nil {
+				conn.UTPConn.Close()
+			}
 
-		<-finCh
-
-		sock.Close()
+			return ctx.Err()
+		}
 
 		return nil
 	} else {
@@ -309,122 +320,155 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool) erro
 		var finalConencted net.Conn
 		var mut sync.Mutex
 
-		for i := range remoteDescription.LocalAddresses {
-			go func(daddr string) {
-				pctx, cancel := context.WithCancel(context.Background())
-				go func() {
-					<-finCh
-					cancel()
-				}()
-				defer cancel()
-			FINISH_TRYING:
-				for {
-					ok := func() bool {
-						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
-						defer cancel()
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch := make(chan string, len(remoteDescription.LocalAddresses))
 
-						connected, err := sock.DialContext(ctx, daddr)
+			for i := range remoteDescription.LocalAddresses {
+				ch <- remoteDescription.LocalAddresses[i]
+			}
 
-						if err != nil {
-							return false
-						}
-
-						connected.SetDeadline(time.Now().Add(5 * time.Second))
-
-						// Read header
-						var hbytes [P2PHeaderLength]byte
-						if _, err := connected.Read(hbytes[:]); err != nil {
-							connected.Close()
-
-							return false
-						}
-
-						var header *P2PHeader
-						if header, err = ParseP2PHeader(hbytes[:]); err != nil {
-							connected.Close()
-
-							return false
-						}
-						if header.Version != P2PCurrentVersion {
-							connected.Close()
-
-							return false
-						}
-
-						encrypted := conn.TLSEncryption && header.Encrypted
-						// Send header
-						hbytes = (&P2PHeader{
-							Version:   P2PCurrentVersion,
-							Encrypted: encrypted,
-						}).GetBytes()
-						if _, err := connected.Write(hbytes[:]); err != nil {
-							connected.Close()
-
-							return false
-						}
-
-						var newConn net.Conn
-
-						if encrypted {
-							newConn = tls.Client(connected, &tls.Config{InsecureSkipVerify: true})
-						} else {
-							newConn = connected
-						}
-
-						if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
-							newConn.Close()
-
-							return false
-						}
-
-						newConn.SetDeadline(time.Now().Add(5 * time.Second))
-
-						b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
-						if err != nil {
-							newConn.Close()
-
-							return false
-						}
-
-						if len(b) != IdentifierLength {
-							newConn.Close()
-
-							return false
-						}
-						if string(b) != conn.identifier {
-							newConn.Close()
-
-							return false
-						}
-
-						newConn.SetDeadline(time.Time{})
-
-						mut.Lock()
-						if finalConencted == nil {
-							finalConencted = newConn
-
-							triggerCh <- struct{}{}
-						} else {
-							newConn.Close()
-						}
-						mut.Unlock()
-						return true
-					}()
-
-					if ok {
-						break FINISH_TRYING
-					}
-					select {
-					case <-finCh:
-						break FINISH_TRYING
-					default:
-					}
+			for {
+				var addr string
+				select {
+				case addr = <-ch:
+					break
+				case addr = <-wrapped.ch:
+					break
+				case <-finCh:
+					return
 				}
-			}(remoteDescription.LocalAddresses[i])
-		}
+				wg.Add(1)
+				go func(daddr string) {
+					defer wg.Done()
+					pctx, cancel := context.WithCancel(context.Background())
+					go func() {
+						<-finCh
+						cancel()
+					}()
+					defer cancel()
+				FINISH_TRYING:
+					for {
+						ok := func() bool {
+							ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
+							defer cancel()
 
-		<-triggerCh
-		close(finCh)
+							connected, err := sock.DialContext(ctx, daddr)
+
+							if err != nil {
+								return false
+							}
+
+							connected.SetDeadline(time.Now().Add(5 * time.Second))
+
+							// Read header
+							var hbytes [P2PHeaderLength]byte
+							if _, err := connected.Read(hbytes[:]); err != nil {
+								connected.Close()
+
+								return false
+							}
+
+							var header *P2PHeader
+							if header, err = ParseP2PHeader(hbytes[:]); err != nil {
+								connected.Close()
+
+								return false
+							}
+							if header.Version != P2PCurrentVersion {
+								connected.Close()
+
+								return false
+							}
+
+							encrypted := conn.TLSEncryption && header.Encrypted
+							// Send header
+							hbytes = (&P2PHeader{
+								Version:   P2PCurrentVersion,
+								Encrypted: encrypted,
+							}).GetBytes()
+							if _, err := connected.Write(hbytes[:]); err != nil {
+								connected.Close()
+
+								return false
+							}
+
+							var newConn net.Conn
+
+							if encrypted {
+								newConn = tls.Client(connected, &tls.Config{InsecureSkipVerify: true})
+							} else {
+								newConn = connected
+							}
+
+							if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
+								newConn.Close()
+
+								return false
+							}
+
+							newConn.SetDeadline(time.Now().Add(5 * time.Second))
+
+							b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
+							if err != nil {
+								newConn.Close()
+
+								return false
+							}
+
+							if len(b) != IdentifierLength {
+								newConn.Close()
+
+								return false
+							}
+							if string(b) != conn.identifier {
+								newConn.Close()
+
+								return false
+							}
+
+							newConn.SetDeadline(time.Time{})
+
+							mut.Lock()
+							if finalConencted == nil {
+								finalConencted = newConn
+
+								triggerCh <- struct{}{}
+							} else {
+								newConn.Close()
+							}
+							mut.Unlock()
+							return true
+						}()
+
+						if ok {
+							break FINISH_TRYING
+						}
+						select {
+						case <-finCh:
+							break FINISH_TRYING
+						default:
+						}
+					}
+				}(addr)
+			}
+		}()
+
+		select {
+		case <-triggerCh:
+			close(finCh)
+
+		case <-ctx.Done():
+			close(finCh)
+			sock.CloseNow()
+
+			wg.Wait()
+			finalConencted.Close()
+
+			return ctx.Err()
+		}
 
 		if _, err := finalConencted.Write([]byte("OK")); err != nil {
 			return err
