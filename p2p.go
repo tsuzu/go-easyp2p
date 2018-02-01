@@ -21,7 +21,6 @@ type P2PConn struct {
 
 	IPDiscoveryServers []string
 	LocalAddresses     []string
-	TLSEncryption      bool
 	CertificateFunc    GetCertificateFuncType
 
 	identifier     string
@@ -32,7 +31,6 @@ func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFunc) *P2PConn
 	return &P2PConn{
 		IPDiscoveryServers: ipDiscoveryServers,
 		discoverIPFunc:     discoverIP,
-		TLSEncryption:      true,
 	}
 }
 
@@ -164,22 +162,20 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 		var config *tls.Config
 
-		if conn.TLSEncryption {
-			if conn.CertificateFunc == nil {
-				conn.CertificateFunc = NewSelfSignedCertificate
-			}
+		if conn.CertificateFunc == nil {
+			conn.CertificateFunc = NewSelfSignedCertificate
+		}
 
-			cert, err := conn.CertificateFunc()
+		cert, err := conn.CertificateFunc()
 
-			if err != nil {
-				sock.Close()
+		if err != nil {
+			sock.Close()
 
-				return err
-			}
+			return err
+		}
 
-			config = &tls.Config{
-				Certificates: []tls.Certificate{cert},
-			}
+		config = &tls.Config{
+			Certificates: []tls.Certificate{cert},
 		}
 
 		finCh := make(chan struct{})
@@ -210,8 +206,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 					// Send header
 					hbytes := (&P2PHeader{
-						Version:   P2PCurrentVersion,
-						Encrypted: conn.TLSEncryption,
+						Version: P2PCurrentVersion,
 					}).GetBytes()
 					if _, err := accepted.Write(hbytes[:]); err != nil {
 						accepted.Close()
@@ -232,12 +227,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 						return
 					}
-					if header.Version != P2PCurrentVersion {
-						accepted.Close()
-
-						return
-					}
-					if !conn.TLSEncryption && header.Encrypted {
+					if header.Version != P2PVersionLatest {
 						accepted.Close()
 
 						return
@@ -245,11 +235,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 					var newConn net.Conn
 
-					if header.Encrypted {
-						newConn = tls.Server(accepted, config)
-					} else {
-						newConn = accepted
-					}
+					newConn = tls.Server(accepted, config)
 
 					newConn.SetDeadline(time.Now().Add(5 * time.Second))
 
@@ -383,11 +369,9 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 								return false
 							}
 
-							encrypted := conn.TLSEncryption && header.Encrypted
 							// Send header
 							hbytes = (&P2PHeader{
-								Version:   P2PCurrentVersion,
-								Encrypted: encrypted,
+								Version: P2PCurrentVersion,
 							}).GetBytes()
 							if _, err := connected.Write(hbytes[:]); err != nil {
 								connected.Close()
@@ -397,11 +381,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 							var newConn net.Conn
 
-							if encrypted {
-								newConn = tls.Client(connected, &tls.Config{InsecureSkipVerify: true})
-							} else {
-								newConn = connected
-							}
+							newConn = tls.Client(connected, &tls.Config{InsecureSkipVerify: true})
 
 							if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
 								newConn.Close()
