@@ -206,7 +206,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 					// Send header
 					hbytes := (&P2PHeader{
-						Version: P2PCurrentVersion,
+						Version: P2PVersionLatest,
 					}).GetBytes()
 					if _, err := accepted.Write(hbytes[:]); err != nil {
 						accepted.Close()
@@ -363,7 +363,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 								return false
 							}
-							if header.Version != P2PCurrentVersion {
+							if header.Version != P2PVersionLatest {
 								connected.Close()
 
 								return false
@@ -371,7 +371,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 							// Send header
 							hbytes = (&P2PHeader{
-								Version: P2PCurrentVersion,
+								Version: P2PVersionLatest,
 							}).GetBytes()
 							if _, err := connected.Write(hbytes[:]); err != nil {
 								connected.Close()

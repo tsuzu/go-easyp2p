@@ -1,7 +1,6 @@
 package easyp2p
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -42,19 +41,10 @@ func NewSelfSignedCertificate() (out tls.Certificate, retErr error) {
 		return
 	}
 
-	certOut, keyOut := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
-	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
-		retErr = err
+	certOut := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyOut := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
 
-		return
-	}
-	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)}); err != nil {
-		retErr = err
-
-		return
-	}
-
-	out, retErr = tls.X509KeyPair(certOut.Bytes(), keyOut.Bytes())
+	out, retErr = tls.X509KeyPair(certOut, keyOut)
 
 	return
 }
