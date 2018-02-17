@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-type GetCertificateFuncType func() (tls.Certificate, error)
+type CertificateGeneratorType func() (tls.Certificate, error)
 
 func NewSelfSignedCertificate() (out tls.Certificate, retErr error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)

@@ -19,18 +19,20 @@ type P2PConn struct {
 	udp     *net.UDPConn
 	UTPConn net.Conn
 
+	CertificateFunc    CertificateGeneratorType
+	DiscoverIPTimeout  time.Duration
+	DiscoverIPFunc     DiscoverIPFuncType
 	IPDiscoveryServers []string
 	LocalAddresses     []string
-	CertificateFunc    GetCertificateFuncType
 
-	identifier     string
-	discoverIPFunc DiscoverIPFunc
+	identifier string
 }
 
-func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFunc) *P2PConn {
+func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFuncType) *P2PConn {
 	return &P2PConn{
 		IPDiscoveryServers: ipDiscoveryServers,
-		discoverIPFunc:     discoverIP,
+		DiscoverIPFunc:     discoverIP,
+		DiscoverIPTimeout:  5 * time.Second,
 	}
 }
 
@@ -60,11 +62,11 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 
 	addrs := make(map[string]struct{})
 
-	if conn.discoverIPFunc != nil {
+	if conn.DiscoverIPFunc != nil {
 		for i := range conn.IPDiscoveryServers {
 			server := conn.IPDiscoveryServers[i]
 
-			addr, err := conn.discoverIPFunc(server, conn.udp)
+			addr, err := conn.DiscoverIPFunc(server, conn.udp, conn.DiscoverIPTimeout)
 
 			if err != nil {
 				retErr = append(retErr, err.Error())

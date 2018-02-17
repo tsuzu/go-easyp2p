@@ -11,7 +11,7 @@ import (
 	"github.com/gortc/stun"
 )
 
-type DiscoverIPFunc func(string, net.PacketConn) (string, error)
+type DiscoverIPFuncType func(string, net.PacketConn, time.Duration) (string, error)
 
 type connectionNopCloser struct {
 	addr net.Addr
@@ -52,7 +52,7 @@ func newConnectionNopCloser(conn net.PacketConn, addr string) (stun.Connection, 
 	}, nil
 }
 
-func DiscoverIPWithSTUN(addr string, conn net.PacketConn) (string, error) {
+func DiscoverIPWithSTUN(addr string, conn net.PacketConn, timeout time.Duration) (string, error) {
 	c, err := newConnectionNopCloser(conn, addr)
 
 	if err != nil {
@@ -62,7 +62,7 @@ func DiscoverIPWithSTUN(addr string, conn net.PacketConn) (string, error) {
 		Connection:  c,
 		TimeoutRate: 100 * time.Millisecond,
 	})
-	conn.SetDeadline(time.Now().Add(time.Second))
+	conn.SetDeadline(time.Now().Add(timeout))
 
 	if err != nil {
 		return "", err
@@ -104,7 +104,7 @@ func DiscoverIPWithSTUN(addr string, conn net.PacketConn) (string, error) {
 }
 
 // DiscoverIPSimple  You can use this with RunServer(), but this is deprecated
-func DiscoverIPSimple(addr string, conn net.PacketConn) (string, error) {
+func DiscoverIPSimple(addr string, conn net.PacketConn, timeout time.Duration) (string, error) {
 	s, err := utp.NewSocketFromPacketConnNoClose(conn)
 
 	if err != nil {
@@ -121,7 +121,7 @@ func DiscoverIPSimple(addr string, conn net.PacketConn) (string, error) {
 
 	defer c.Close()
 
-	c.SetDeadline(time.Now().Add(4 * time.Second))
+	c.SetDeadline(time.Now().Add(timeout))
 
 	c.Write([]byte(fmt.Sprintf("%s %s", IPDiscoveryRequestHeader, IPDiscoveryVersion)))
 

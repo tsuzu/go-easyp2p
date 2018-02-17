@@ -8,7 +8,7 @@ import (
 	"github.com/anacrolix/utp"
 )
 
-func RunServer(addr string) {
+func RunDiscoverIPSimpleServer(addr string) {
 	log.Println("Server started")
 	listener, err := utp.Listen(addr)
 
