@@ -3,6 +3,7 @@ package easyp2p
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 )
 
 const (
@@ -13,6 +14,20 @@ const (
 
 	P2PVersionLatest = P2PVersion1_1
 )
+
+func P2PVersionString(version uint32) string {
+	s := fmt.Sprintf("%d.%d", version/1000, version%1000/100)
+
+	if v := version % 100 / 10; v != 0 {
+		s = fmt.Sprintf("%s.%d", s, v)
+	}
+
+	if v := version % 10; v != 0 {
+		s = fmt.Sprintf("%s.%d", s, v)
+	}
+
+	return s
+}
 
 type P2PHeader struct {
 	Version uint32
