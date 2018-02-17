@@ -63,13 +63,16 @@ func DiscoverIPWithSTUN(addr string, conn net.PacketConn) (string, error) {
 		TimeoutRate: 100 * time.Millisecond,
 	})
 	conn.SetDeadline(time.Now().Add(time.Second))
-	defer conn.SetDeadline(time.Time{})
 
 	if err != nil {
 		return "", err
 	}
 
-	defer client.Close()
+	defer func() {
+		conn.SetDeadline(time.Now().Add(-1))
+		client.Close()
+		conn.SetDeadline(time.Time{})
+	}()
 
 	message := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
 	var retErr error
