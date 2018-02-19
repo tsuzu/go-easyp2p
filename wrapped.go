@@ -2,6 +2,7 @@ package easyp2p
 
 import (
 	"net"
+	"sync/atomic"
 )
 
 type PacketConnIgnoreOK struct {
@@ -42,3 +43,24 @@ func (wpc *PacketConnIgnoreOK) ReadFrom(b []byte) (int, net.Addr, error) {
 
 	return n, err
 }*/
+
+type PacketConnChangeableCloserStatus struct {
+	net.PacketConn
+	status int32
+}
+
+func (p *PacketConnChangeableCloserStatus) SetStatus(enabled bool) {
+	var v int32
+	if enabled {
+		v = 1
+	}
+	atomic.StoreInt32(&p.status, v)
+}
+
+func (p *PacketConnChangeableCloserStatus) Close() error {
+	if atomic.LoadInt32(&p.status) == 1 {
+		return p.PacketConn.Close()
+	}
+
+	return nil
+}

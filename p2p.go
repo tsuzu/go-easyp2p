@@ -144,7 +144,8 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 		wrapped.ch = make(chan string, 1024)
 	}
 
-	sock, err := utp.NewSocketFromPacketConnNoClose(wrapped)
+	changeable := &PacketConnChangeableCloserStatus{PacketConn: wrapped}
+	sock, err := utp.NewSocketFromPacketConn(changeable)
 
 	if err != nil {
 		return err
@@ -182,6 +183,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 		finCh := make(chan struct{})
 		var wg sync.WaitGroup
+		var mut sync.RWMutex
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -204,6 +206,20 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+
+					okChan := make(chan struct{})
+					go func() {
+						select {
+						case <-okChan:
+							return
+						case <-finCh:
+							select {
+							case <-okChan:
+							default:
+								accepted.Close()
+							}
+						}
+					}()
 					accepted.SetDeadline(time.Now().Add(5 * time.Second))
 
 					// Send header
@@ -211,6 +227,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 						Version: P2PVersionLatest,
 					}).GetBytes()
 					if _, err := accepted.Write(hbytes[:]); err != nil {
+						close(okChan)
 						accepted.Close()
 
 						return
@@ -218,6 +235,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 					// Read header
 					if _, err := accepted.Read(hbytes[:]); err != nil {
+						close(okChan)
 						accepted.Close()
 
 						return
@@ -225,11 +243,13 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 					var header *P2PHeader
 					if header, err = ParseP2PHeader(hbytes[:]); err != nil {
+						close(okChan)
 						accepted.Close()
 
 						return
 					}
 					if header.Version != P2PVersionLatest {
+						close(okChan)
 						accepted.Close()
 
 						return
@@ -243,22 +263,26 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 					b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
 					if err != nil {
+						close(okChan)
 						newConn.Close()
 
 						return
 					}
 					if len(b) != IdentifierLength {
+						close(okChan)
 						newConn.Close()
 
 						return
 					}
 					if string(b) != conn.identifier {
+						close(okChan)
 						newConn.Close()
 
 						return
 					}
 
 					if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
+						close(okChan)
 						newConn.Close()
 
 						return
@@ -268,6 +292,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 					n, err := newConn.Read(b)
 
 					if err != nil {
+						close(okChan)
 						newConn.Close()
 
 						return
@@ -277,19 +302,25 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 					newConn.SetDeadline(time.Time{})
 
 					if string(b) == "OK" {
+						mut.Lock()
 						conn.UTPConn = newConn
+						mut.Unlock()
 
+						close(okChan)
 						close(finCh)
 					} else {
+						close(okChan)
 						newConn.Close()
 					}
-
 				}()
 			}
 		}()
 		select {
 		case <-finCh:
 			sock.Close()
+			changeable.SetStatus(true)
+			wg.Wait()
+
 		case <-ctx.Done():
 			sock.CloseNow()
 			wg.Wait()
@@ -348,12 +379,27 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 							if err != nil {
 								return false
 							}
+							okChan := make(chan struct{})
+							go func() {
+								select {
+								case <-okChan:
+									return
+								case <-finCh:
+									select {
+									case <-okChan:
+									default:
+										connected.SetDeadline(time.Now())
+										connected.Close()
+									}
+								}
+							}()
 
 							connected.SetDeadline(time.Now().Add(5 * time.Second))
 
 							// Read header
 							var hbytes [P2PHeaderLength]byte
 							if _, err := connected.Read(hbytes[:]); err != nil {
+								close(okChan)
 								connected.Close()
 
 								return false
@@ -361,11 +407,13 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 							var header *P2PHeader
 							if header, err = ParseP2PHeader(hbytes[:]); err != nil {
+								close(okChan)
 								connected.Close()
 
 								return false
 							}
 							if header.Version != P2PVersionLatest {
+								close(okChan)
 								connected.Close()
 
 								return false
@@ -386,6 +434,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 							newConn = tls.Client(connected, &tls.Config{InsecureSkipVerify: true})
 
 							if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
+								close(okChan)
 								newConn.Close()
 
 								return false
@@ -395,17 +444,20 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 							b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
 							if err != nil {
+								close(okChan)
 								newConn.Close()
 
 								return false
 							}
 
 							if len(b) != IdentifierLength {
+								close(okChan)
 								newConn.Close()
 
 								return false
 							}
 							if string(b) != conn.identifier {
+								close(okChan)
 								newConn.Close()
 
 								return false
@@ -417,6 +469,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 							if finalConencted == nil {
 								finalConencted = newConn
 
+								close(okChan)
 								triggerCh <- struct{}{}
 							} else {
 								newConn.Close()
@@ -457,6 +510,9 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 		}
 
 		conn.UTPConn = finalConencted
+		sock.Close()
+		changeable.SetStatus(true)
+		wg.Wait()
 
 		return nil
 	}
@@ -495,10 +551,16 @@ func (conn *P2PConn) Write(b []byte) (int, error) {
 
 func (conn *P2PConn) Close() error {
 	if conn.UTPConn != nil {
-		conn.UTPConn.Close()
-	}
-	if conn.udp != nil {
-		return conn.udp.Close()
+		e := conn.UTPConn.Close()
+		conn.UTPConn = nil
+		conn.udp = nil
+
+		return e
+	} else if conn.udp != nil {
+		e := conn.udp.Close()
+		conn.udp = nil
+
+		return e
 	}
 
 	return nil
