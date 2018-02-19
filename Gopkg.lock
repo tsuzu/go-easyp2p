@@ -21,7 +21,7 @@
   branch = "master"
   name = "github.com/anacrolix/utp"
   packages = ["."]
-  revision = "8f203a102e24cf3a4562583de6c649907a4a5352"
+  revision = "6063927c7ba74fdeefdfd80ab2ff4c9472fbcd18"
 
 [[projects]]
   name = "github.com/gortc/stun"
