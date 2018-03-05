@@ -20,6 +20,8 @@ func RandomSecureIdentifier() string {
 }
 
 type Description struct {
-	LocalAddresses []string
-	Identifier     string
+	ProtocolVersion uint32
+	LocalAddresses  []string
+	Identifier      string
+	CAPEM           []byte
 }

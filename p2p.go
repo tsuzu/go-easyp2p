@@ -1,23 +1,26 @@
 package easyp2p
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/anacrolix/utp"
+	"github.com/lucas-clemente/quic-go"
 )
 
 type P2PConn struct {
-	udp     *net.UDPConn
-	UTPConn net.Conn
+	RawConn      *net.UDPConn
+	ReliableConn net.Conn
 
 	CertificateFunc    CertificateGeneratorType
 	DiscoverIPTimeout  time.Duration
@@ -26,6 +29,7 @@ type P2PConn struct {
 	LocalAddresses     []string
 
 	identifier string
+	cert       CertificatesType
 }
 
 func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFuncType) *P2PConn {
@@ -44,14 +48,14 @@ func (conn *P2PConn) Listen(port int) (string, error) {
 		return "", err
 	}
 
-	conn.udp = udp
+	conn.RawConn = udp
 
 	return udp.LocalAddr().String(), nil
 }
 
 // The first boolean value is whether one address at least is found  or not.
 func (conn *P2PConn) DiscoverIP() (bool, error) {
-	if conn.udp == nil {
+	if conn.RawConn == nil {
 		if _, err := conn.Listen(0); err != nil {
 			return false, err
 		}
@@ -66,7 +70,7 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 		for i := range conn.IPDiscoveryServers {
 			server := conn.IPDiscoveryServers[i]
 
-			addr, err := conn.DiscoverIPFunc(server, conn.udp, conn.DiscoverIPTimeout)
+			addr, err := conn.DiscoverIPFunc(server, conn.RawConn, conn.DiscoverIPTimeout)
 
 			if err != nil {
 				retErr = append(retErr, err.Error())
@@ -84,7 +88,8 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 	if err != nil {
 		retErr = append(retErr, err.Error())
 	} else {
-		port := strings.TrimPrefix(conn.udp.LocalAddr().String(), "[::]")
+		localAddr := conn.RawConn.LocalAddr().String()
+		port := localAddr[strings.LastIndex(localAddr, ":"):]
 
 		for i := range ifaces {
 			a, err := ifaces[i].Addrs()
@@ -125,61 +130,73 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 	return leastOne, nil
 }
 
-func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx context.Context) error {
+func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context) error {
 	var remoteDescription Description
 	if err := json.Unmarshal([]byte(remoteDescriptionString), &remoteDescription); err != nil {
 		return err
 	}
 
-	wrapped := &PacketConnIgnoreOK{
-		PacketConn: conn.udp,
+	if remoteDescription.ProtocolVersion != P2PVersionLatest {
+		return ErrDifferentProtocol
+	}
+
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(remoteDescription.CAPEM) {
+		return ErrInvalidCACertificate
+	}
+
+	asServer := bytes.Compare(remoteDescription.CAPEM, conn.cert.caCertPEM) > 0
+
+	ignore := &PacketConnIgnoreOK{
+		PacketConn: conn.RawConn,
 	}
 
 	if !asServer {
-		wrapped.addrs = make(map[string]struct{})
+		ignore.addrs = make(map[string]struct{})
 
 		for _, msg := range remoteDescription.LocalAddresses {
-			wrapped.addrs[msg] = struct{}{}
+			ignore.addrs[msg] = struct{}{}
 		}
-		wrapped.ch = make(chan string, 1024)
+		ignore.ch = make(chan string, 1024)
 	}
 
-	changeable := &PacketConnChangeableCloserStatus{PacketConn: wrapped}
-	sock, err := utp.NewSocketFromPacketConn(changeable)
-
-	if err != nil {
-		return err
-	}
+	changeable := &PacketConnChangeableCloserStatus{PacketConn: ignore}
 
 	if asServer {
+		var config *tls.Config
+
+		config = &tls.Config{
+			Certificates: []tls.Certificate{conn.cert.cert},
+			ClientCAs:    pool,
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+		}
+
+		quicConfig := &quic.Config{
+			MaxIncomingStreams:    1,
+			MaxIncomingUniStreams: 0,
+			KeepAlive:             true,
+		}
+
+		filtered := newFilterPacketConn(changeable)
+
+		listener, err := quic.Listen(filtered, config, quicConfig)
+
+		if err != nil {
+			return err
+		}
+
+		log.Println("start listening")
+
 		go func() {
 			for i := 0; i < 3; i++ {
 				for i := range remoteDescription.LocalAddresses {
 					addr, err := net.ResolveUDPAddr("udp", remoteDescription.LocalAddresses[i])
 					if err == nil {
-						sock.WriteTo([]byte("OK"), addr)
+						changeable.WriteTo([]byte("OK"), addr)
 					}
 				}
 			}
 		}()
-
-		var config *tls.Config
-
-		if conn.CertificateFunc == nil {
-			conn.CertificateFunc = NewSelfSignedCertificate
-		}
-
-		cert, err := conn.CertificateFunc()
-
-		if err != nil {
-			sock.Close()
-
-			return err
-		}
-
-		config = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-		}
 
 		finCh := make(chan struct{})
 		var wg sync.WaitGroup
@@ -188,24 +205,29 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 		go func() {
 			defer wg.Done()
 			for {
-				accepted, err := sock.Accept()
+				session, err := listener.Accept()
 
 				select {
 				case <-finCh:
-					if accepted != nil {
-						accepted.Close()
+					if session != nil {
+						session.Close(nil)
 					}
 					return
 				default:
 				}
 
 				if err != nil {
+					log.Println(err)
 					continue
 				}
+
+				log.Println("accepted")
 
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
+
+					var accepted *quicSessionStream
 
 					okChan := make(chan struct{})
 					go func() {
@@ -216,22 +238,38 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 							select {
 							case <-okChan:
 							default:
+								log.Println("close now")
 								accepted.Close()
 							}
 						}
 					}()
-					accepted.SetDeadline(time.Now().Add(5 * time.Second))
 
-					// Send header
-					hbytes := (&P2PHeader{
-						Version: P2PVersionLatest,
-					}).GetBytes()
-					if _, err := accepted.Write(hbytes[:]); err != nil {
-						close(okChan)
-						accepted.Close()
+					accepted = newQuicSessionStream(session)
 
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					if err := accepted.Init(true /*server mode*/, ctx); err != nil {
+						log.Println(err)
+						cancel()
 						return
 					}
+					cancel()
+
+					accepted.SetDeadline(time.Now().Add(5 * time.Second))
+
+					log.Println("handshake start")
+
+					var sendHeaderWG sync.WaitGroup
+					sendHeaderWG.Add(1)
+					go func() {
+						defer sendHeaderWG.Done()
+						// Send header
+						hbytes := (&P2PHeader{
+							Version: P2PVersionLatest,
+						}).GetBytes()
+						accepted.Write(hbytes[:])
+					}()
+
+					var hbytes [P2PHeaderLength]byte
 
 					// Read header
 					if _, err := accepted.Read(hbytes[:]); err != nil {
@@ -255,77 +293,77 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 						return
 					}
 
-					var newConn net.Conn
+					sendHeaderWG.Wait()
 
-					newConn = tls.Server(accepted, config)
+					log.Println("a")
 
-					newConn.SetDeadline(time.Now().Add(5 * time.Second))
-
-					b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
+					b, err := ioutil.ReadAll(&io.LimitedReader{R: accepted, N: int64(IdentifierLength)})
 					if err != nil {
 						close(okChan)
-						newConn.Close()
+						accepted.Close()
 
 						return
 					}
 					if len(b) != IdentifierLength {
 						close(okChan)
-						newConn.Close()
+						accepted.Close()
 
 						return
 					}
 					if string(b) != conn.identifier {
 						close(okChan)
-						newConn.Close()
+						accepted.Close()
 
 						return
 					}
 
-					if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
+					if _, err := accepted.Write([]byte(remoteDescription.Identifier)); err != nil {
 						close(okChan)
-						newConn.Close()
+						accepted.Close()
 
 						return
 					}
 
 					b = make([]byte, 2)
-					n, err := newConn.Read(b)
+					n, err := accepted.Read(b)
 
 					if err != nil {
 						close(okChan)
-						newConn.Close()
+						accepted.Close()
 
 						return
 					}
 
 					b = b[:n]
-					newConn.SetDeadline(time.Time{})
+					accepted.SetDeadline(time.Time{})
 
 					if string(b) == "OK" {
 						mut.Lock()
-						conn.UTPConn = newConn
+						conn.ReliableConn = accepted
 						mut.Unlock()
 
 						close(okChan)
 						close(finCh)
+						log.Println("selected")
 					} else {
 						close(okChan)
-						newConn.Close()
+						accepted.Close()
 					}
 				}()
 			}
 		}()
 		select {
 		case <-finCh:
-			sock.Close()
+			filtered.setAllowedAddress(conn.ReliableConn.RemoteAddr().String())
 			changeable.SetStatus(true)
 			wg.Wait()
+			log.Println("waited")
 
 		case <-ctx.Done():
-			sock.CloseNow()
+			listener.Close()
 			wg.Wait()
-			if conn.UTPConn != nil {
-				conn.UTPConn.Close()
+			if conn.ReliableConn != nil {
+				conn.ReliableConn.Close()
 			}
 
 			return ctx.Err()
@@ -336,8 +374,19 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 		finCh := make(chan struct{})
 		triggerCh := make(chan struct{})
 
-		var finalConencted net.Conn
+		var selected net.Conn
 		var mut sync.Mutex
+
+		config := &tls.Config{
+			RootCAs:      pool,
+			ServerName:   CertificateServerName,
+			Certificates: []tls.Certificate{conn.cert.cert},
+		}
+
+		sharable := newSharablePacketConn(changeable)
+
+		sharable.Start()
+		defer sharable.Stop()
 
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -354,7 +403,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 				select {
 				case addr = <-ch:
 					break
-				case addr = <-wrapped.ch:
+				case addr = <-ignore.ch:
 					break
 				case <-finCh:
 					return
@@ -370,15 +419,43 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 					defer cancel()
 				FINISH_TRYING:
 					for {
-						ok := func() bool {
+						finish := func() bool {
+							cpc, err := sharable.Register(daddr)
+
+							if err != nil {
+								return true
+							}
+
+							log.Println("dial", daddr)
+							session, err := quic.Dial(
+								cpc,
+								cpc.addr,
+								CertificateServerName,
+								config,
+								&quic.Config{
+									MaxIncomingStreams:    0,
+									MaxIncomingUniStreams: 0,
+									KeepAlive:             true,
+								},
+							)
+
+							log.Println("connected", err)
+
+							if err != nil {
+								cpc.Close()
+
+								return false
+							}
+
+							connected := newQuicSessionStream(session)
+
 							ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
 							defer cancel()
 
-							connected, err := sock.DialContext(ctx, "", daddr)
-
-							if err != nil {
+							if err := connected.Init(false /*client mode*/, ctx); err != nil {
 								return false
 							}
+
 							okChan := make(chan struct{})
 							go func() {
 								select {
@@ -395,6 +472,17 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 							}()
 
 							connected.SetDeadline(time.Now().Add(5 * time.Second))
+
+							var sendHeaderWG sync.WaitGroup
+							sendHeaderWG.Add(1)
+							go func() {
+								defer sendHeaderWG.Done()
+								// Send header
+								hbytes := (&P2PHeader{
+									Version: P2PVersionLatest,
+								}).GetBytes()
+								connected.Write(hbytes[:])
+							}()
 
 							// Read header
 							var hbytes [P2PHeaderLength]byte
@@ -419,66 +507,54 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 								return false
 							}
 
-							// Send header
-							hbytes = (&P2PHeader{
-								Version: P2PVersionLatest,
-							}).GetBytes()
-							if _, err := connected.Write(hbytes[:]); err != nil {
+							sendHeaderWG.Wait()
+
+							if _, err := connected.Write([]byte(remoteDescription.Identifier)); err != nil {
+								close(okChan)
 								connected.Close()
 
 								return false
 							}
 
-							var newConn net.Conn
+							connected.SetDeadline(time.Now().Add(5 * time.Second))
 
-							newConn = tls.Client(connected, &tls.Config{InsecureSkipVerify: true})
-
-							if _, err := newConn.Write([]byte(remoteDescription.Identifier)); err != nil {
-								close(okChan)
-								newConn.Close()
-
-								return false
-							}
-
-							newConn.SetDeadline(time.Now().Add(5 * time.Second))
-
-							b, err := ioutil.ReadAll(&io.LimitedReader{R: newConn, N: int64(IdentifierLength)})
+							b, err := ioutil.ReadAll(&io.LimitedReader{R: connected, N: int64(IdentifierLength)})
 							if err != nil {
 								close(okChan)
-								newConn.Close()
+								connected.Close()
 
 								return false
 							}
 
 							if len(b) != IdentifierLength {
 								close(okChan)
-								newConn.Close()
+								connected.Close()
 
 								return false
 							}
 							if string(b) != conn.identifier {
 								close(okChan)
-								newConn.Close()
+								connected.Close()
 
 								return false
 							}
 
-							newConn.SetDeadline(time.Time{})
+							connected.SetDeadline(time.Time{})
 
 							mut.Lock()
-							if finalConencted == nil {
-								finalConencted = newConn
+							if selected == nil {
+								selected = connected
 
 								close(okChan)
-								triggerCh <- struct{}{}
+								close(triggerCh)
 							} else {
-								newConn.Close()
+								connected.Close()
 							}
 							mut.Unlock()
 							return true
 						}()
 
-						if ok {
+						if finish {
 							break FINISH_TRYING
 						}
 						select {
@@ -497,22 +573,26 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, asServer bool, ctx 
 
 		case <-ctx.Done():
 			close(finCh)
-			sock.CloseNow()
 
 			wg.Wait()
-			finalConencted.Close()
+			if selected != nil {
+				selected.Close()
+			}
 
 			return ctx.Err()
 		}
 
-		if _, err := finalConencted.Write([]byte("OK")); err != nil {
+		if _, err := selected.Write([]byte("OK")); err != nil {
 			return err
 		}
 
-		conn.UTPConn = finalConencted
-		sock.Close()
+		conn.ReliableConn = selected
+		sharable.SwitchToOne(selected.RemoteAddr().String())
 		changeable.SetStatus(true)
+		log.Println("select")
+		sharable.Stop()
 		wg.Wait()
+		log.Println("select ok")
 
 		return nil
 	}
@@ -525,40 +605,54 @@ func (conn *P2PConn) LocalDescription() (string, error) {
 
 	conn.identifier = RandomSecureIdentifier()
 
+	if conn.CertificateFunc == nil {
+		conn.CertificateFunc = NewSelfSignedCertificate
+	}
+
+	cert, err := conn.CertificateFunc()
+
+	if err != nil {
+		return "", err
+	}
+
+	conn.cert = cert
+
 	b, _ := json.Marshal(Description{
-		LocalAddresses: conn.LocalAddresses,
-		Identifier:     conn.identifier,
+		ProtocolVersion: P2PVersionLatest,
+		LocalAddresses:  conn.LocalAddresses,
+		Identifier:      conn.identifier,
+		CAPEM:           cert.caCertPEM,
 	})
 
 	return string(b), nil
 }
 
 func (conn *P2PConn) Read(b []byte) (int, error) {
-	if conn.UTPConn == nil {
+	if conn.ReliableConn == nil {
 		return 0, ErrNotConnected
 	}
 
-	return conn.UTPConn.Read(b)
+	return conn.ReliableConn.Read(b)
 }
 
 func (conn *P2PConn) Write(b []byte) (int, error) {
-	if conn.UTPConn == nil {
+	if conn.ReliableConn == nil {
 		return 0, ErrNotConnected
 	}
 
-	return conn.UTPConn.Write(b)
+	return conn.ReliableConn.Write(b)
 }
 
 func (conn *P2PConn) Close() error {
-	if conn.UTPConn != nil {
-		e := conn.UTPConn.Close()
-		conn.UTPConn = nil
-		conn.udp = nil
+	if conn.ReliableConn != nil {
+		e := conn.ReliableConn.Close()
+		conn.ReliableConn = nil
+		conn.RawConn = nil
 
 		return e
-	} else if conn.udp != nil {
-		e := conn.udp.Close()
-		conn.udp = nil
+	} else if conn.RawConn != nil {
+		e := conn.RawConn.Close()
+		conn.RawConn = nil
 
 		return e
 	}

@@ -7,6 +7,10 @@ const IPDiscoveryRequestHeader = "DISCOVER_IP"
 const IPDiscoveryResponseHeaderOK = "OK"
 const IPDiscoveryResponseHeaderProcotolError = "PROTOCOL_ERROR"
 
+// Mutable, but must not be edited
+
 var ErrUnknownProtocol = errors.New("Unknown DiscoverIP Protocol")
 var ErrNotConnected = errors.New("Not connected")
 var ErrInsufficientLocalAdrdesses = errors.New("Insufficient local addresses")
+var ErrInvalidCACertificate = errors.New("Invalid CA Certificate")
+var ErrDifferentProtocol = errors.New("Different protocol")

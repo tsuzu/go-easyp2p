@@ -11,18 +11,45 @@ import (
 	"time"
 )
 
-type CertificateGeneratorType func() (tls.Certificate, error)
+const CertificateServerName = "easyp2p.go"
 
-func NewSelfSignedCertificate() (out tls.Certificate, retErr error) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+// dns names in the certificate of the server must be easyp2p.go
+type CertificateGeneratorType func() (CertificatesType, error)
+
+type CertificatesType struct {
+	caCertPEM []byte
+	cert      tls.Certificate
+}
+
+func NewSelfSignedCertificate() (out CertificatesType, retErr error) {
+	ca := &x509.Certificate{
+		SerialNumber: new(big.Int).SetInt64(0),
+		Subject: pkix.Name{
+			Organization: []string{"easyp2p-ca"},
+		},
+		NotBefore: time.Now().AddDate(-1, 0, 0),
+		NotAfter:  time.Now().AddDate(10, 0, 0),
+		IsCA:      true,
+
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+
+	caPriv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	caX509, err := x509.CreateCertificate(rand.Reader, ca, ca, &caPriv.PublicKey, caPriv)
 	if err != nil {
 		retErr = err
 
 		return
 	}
 
-	template := x509.Certificate{
+	out.caCertPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caX509})
+	//caKeyOut := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(caPriv)})
+
+	template := &x509.Certificate{
 		SerialNumber: new(big.Int).SetInt64(0),
+		DNSNames:     []string{CertificateServerName},
 		Subject: pkix.Name{
 			Organization: []string{"easyp2p"},
 		},
@@ -30,11 +57,12 @@ func NewSelfSignedCertificate() (out tls.Certificate, retErr error) {
 		NotAfter:  time.Now().AddDate(10, 0, 0),
 
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 	}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, ca, &priv.PublicKey, caPriv)
 	if err != nil {
 		retErr = err
 
@@ -44,7 +72,7 @@ func NewSelfSignedCertificate() (out tls.Certificate, retErr error) {
 	certOut := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 	keyOut := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
 
-	out, retErr = tls.X509KeyPair(certOut, keyOut)
+	out.cert, retErr = tls.X509KeyPair(certOut, keyOut)
 
 	return
 }

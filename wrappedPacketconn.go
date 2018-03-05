@@ -13,9 +13,9 @@ type PacketConnIgnoreOK struct {
 	net.PacketConn
 }
 
+// len(b) must be >=2
 func (wpc *PacketConnIgnoreOK) ReadFrom(b []byte) (int, net.Addr, error) {
 	n, addr, err := wpc.PacketConn.ReadFrom(b)
-
 	if err != nil {
 		return n, addr, err
 	}

@@ -11,6 +11,7 @@ const (
 
 	P2PVersion1_0 uint32 = 1000
 	P2PVersion1_1 uint32 = 1100
+	P2PVersion2_0 uint32 = 2000
 
 	P2PVersionLatest = P2PVersion1_1
 )
