@@ -2,7 +2,6 @@ package easyp2p
 
 import (
 	"errors"
-	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -89,7 +88,6 @@ func (spc *sharablePacketConn) Start() {
 
 				return
 			case <-spc.stopChan:
-				log.Println("stopping")
 				spc.mut.Lock()
 
 				chs := make([]chan struct{}, 0, len(spc.registered))
@@ -165,8 +163,13 @@ func (spc *sharablePacketConn) Register(addrStr string) (*childPacketConn, error
 }
 
 func (spc *sharablePacketConn) SwitchToOne(address string) {
-	spc.stopChan = nil
-	spc.switchChan <- address
+	if spc.switchChan != nil {
+		spc.switchChan <- address
+		spc.wg.Wait()
+
+		spc.stopChan = nil
+		spc.switchChan = nil
+	}
 }
 
 func (spc *sharablePacketConn) Stop() {
@@ -175,6 +178,7 @@ func (spc *sharablePacketConn) Stop() {
 		spc.wg.Wait()
 
 		spc.stopChan = nil
+		spc.switchChan = nil
 	}
 }
 
@@ -195,9 +199,9 @@ func (ipc *childPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error)
 				n, addr, err = ipc.spc.pconn.ReadFrom(b)
 
 				if addr == nil {
-					log.Println(err)
 					return n, nil, err
 				} else if addr.String() == ipc.addr.String() {
+
 					return
 				}
 			}
@@ -209,7 +213,6 @@ func (ipc *childPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error)
 		if !ok {
 			ipc.spc.mut.Unlock()
 
-			log.Println(errDisconnected)
 			return 0, nil, errDisconnected
 		}
 		if len(rv.recv) != 0 {
@@ -245,7 +248,7 @@ func (ipc *childPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) 
 		return 0, errForbiddenAddress
 	}
 
-	if atomic.LoadInt32(&ipc.status) != 0 {
+	if atomic.LoadInt32(&ipc.status) == 1 {
 		return 0, errDisconnected
 	}
 
@@ -265,7 +268,6 @@ func (ipc *childPacketConn) Close() error {
 	ipc.spc.mut.Unlock()
 
 	if atomic.LoadInt32(&ipc.status) == 2 {
-		log.Println("close")
 		return ipc.spc.pconn.Close()
 	}
 

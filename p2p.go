@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -30,6 +29,7 @@ type P2PConn struct {
 
 	identifier string
 	cert       CertificatesType
+	listener   quic.Listener
 }
 
 func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFuncType) *P2PConn {
@@ -163,9 +163,17 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 	changeable := &PacketConnChangeableCloserStatus{PacketConn: ignore}
 
 	if asServer {
-		var config *tls.Config
+		acceptCancelCert, err := conn.CertificateFunc()
 
-		config = &tls.Config{
+		if err != nil {
+			return err
+		}
+
+		if !pool.AppendCertsFromPEM(acceptCancelCert.caCertPEM) {
+			return ErrInvalidCACertificate
+		}
+
+		config := &tls.Config{
 			Certificates: []tls.Certificate{conn.cert.cert},
 			ClientCAs:    pool,
 			ClientAuth:   tls.RequireAndVerifyClientCert,
@@ -175,6 +183,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 			MaxIncomingStreams:    1,
 			MaxIncomingUniStreams: 0,
 			KeepAlive:             true,
+			IdleTimeout:           10 * time.Second,
 		}
 
 		filtered := newFilterPacketConn(changeable)
@@ -184,8 +193,6 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 		if err != nil {
 			return err
 		}
-
-		log.Println("start listening")
 
 		go func() {
 			for i := 0; i < 3; i++ {
@@ -204,28 +211,53 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
-				session, err := listener.Accept()
 
+			var wgAccepted sync.WaitGroup
+			defer wgAccepted.Wait()
+
+			acceptChan := make(chan quic.Session, 10)
+			go func() {
+				defer close(acceptChan)
+				for {
+					session, err := listener.Accept()
+
+					if err != nil {
+						return
+					}
+
+					select {
+					case <-finCh:
+						session.Close(nil)
+						return
+					default:
+					}
+
+					acceptChan <- session
+				}
+			}()
+
+			for {
+				var session quic.Session
+				var ok bool
 				select {
+				case session, ok = <-acceptChan:
+					if !ok {
+						return
+					}
 				case <-finCh:
 					if session != nil {
 						session.Close(nil)
 					}
 					return
-				default:
 				}
 
 				if err != nil {
-					log.Println(err)
 					continue
 				}
 
-				log.Println("accepted")
-
-				wg.Add(1)
+				wgAccepted.Add(1)
 				go func() {
-					defer wg.Done()
+					defer wgAccepted.Done()
 
 					var accepted *quicSessionStream
 
@@ -238,7 +270,6 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 							select {
 							case <-okChan:
 							default:
-								log.Println("close now")
 								accepted.Close()
 							}
 						}
@@ -248,15 +279,12 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 					if err := accepted.Init(true /*server mode*/, ctx); err != nil {
-						log.Println(err)
 						cancel()
 						return
 					}
 					cancel()
 
 					accepted.SetDeadline(time.Now().Add(5 * time.Second))
-
-					log.Println("handshake start")
 
 					var sendHeaderWG sync.WaitGroup
 					sendHeaderWG.Add(1)
@@ -294,8 +322,6 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 					}
 
 					sendHeaderWG.Wait()
-
-					log.Println("a")
 
 					b, err := ioutil.ReadAll(&io.LimitedReader{R: accepted, N: int64(IdentifierLength)})
 					if err != nil {
@@ -344,7 +370,6 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 
 						close(okChan)
 						close(finCh)
-						log.Println("selected")
 					} else {
 						close(okChan)
 						accepted.Close()
@@ -354,10 +379,35 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 		}()
 		select {
 		case <-finCh:
-			filtered.setAllowedAddress(conn.ReliableConn.RemoteAddr().String())
-			changeable.SetStatus(true)
+
+			// Stop accepting TODO: change into a smarter way
+			go func() {
+				defer filtered.setAllowedAddress(conn.ReliableConn.RemoteAddr().String())
+				addr := listener.Addr().String()
+				port := addr[strings.LastIndex(addr, ":")+1:]
+
+				c, err := quic.DialAddr(
+					"localhost:"+port,
+					&tls.Config{
+						Certificates:       []tls.Certificate{acceptCancelCert.cert},
+						InsecureSkipVerify: true,
+					},
+					&quic.Config{
+						MaxIncomingStreams:    0,
+						MaxIncomingUniStreams: 0,
+						HandshakeTimeout:      1 * time.Second,
+						IdleTimeout:           1 * time.Second,
+					},
+				)
+
+				if err == nil {
+					c.Close(nil)
+				}
+			}()
+
 			wg.Wait()
-			log.Println("waited")
+			changeable.SetStatus(true)
+			conn.listener = listener
 
 		case <-ctx.Done():
 			listener.Close()
@@ -426,7 +476,6 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 								return true
 							}
 
-							log.Println("dial", daddr)
 							session, err := quic.Dial(
 								cpc,
 								cpc.addr,
@@ -438,8 +487,6 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 									KeepAlive:             true,
 								},
 							)
-
-							log.Println("connected", err)
 
 							if err != nil {
 								cpc.Close()
@@ -589,10 +636,8 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 		conn.ReliableConn = selected
 		sharable.SwitchToOne(selected.RemoteAddr().String())
 		changeable.SetStatus(true)
-		log.Println("select")
 		sharable.Stop()
 		wg.Wait()
-		log.Println("select ok")
 
 		return nil
 	}
@@ -648,6 +693,12 @@ func (conn *P2PConn) Close() error {
 		e := conn.ReliableConn.Close()
 		conn.ReliableConn = nil
 		conn.RawConn = nil
+
+		if conn.listener != nil {
+			conn.listener.Close()
+
+			conn.listener = nil
+		}
 
 		return e
 	} else if conn.RawConn != nil {

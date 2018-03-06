@@ -62,9 +62,19 @@ func (qss *quicSessionStream) Write(b []byte) (n int, err error) {
 
 func (qss *quicSessionStream) Close() error {
 	if qss.stream != nil {
-		qss.stream.Close()
+		if err := qss.stream.Close(); err != nil {
+			return err
+		}
+
+		<-qss.stream.Context().Done()
 	}
-	return qss.session.Close(nil)
+	if err := qss.session.Close(nil); err != nil {
+		return err
+	}
+
+	<-qss.session.Context().Done()
+
+	return nil
 }
 
 func (qss *quicSessionStream) LocalAddr() net.Addr {
