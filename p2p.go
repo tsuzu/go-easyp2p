@@ -147,7 +147,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 
 	asServer := bytes.Compare(remoteDescription.CAPEM, conn.cert.caCertPEM) > 0
 
-	ignore := &PacketConnIgnoreOK{
+	ignore := &packetConnIgnoreOK{
 		PacketConn: conn.RawConn,
 	}
 
@@ -160,7 +160,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 		ignore.ch = make(chan string, 1024)
 	}
 
-	changeable := &PacketConnChangeableCloserStatus{PacketConn: ignore}
+	changeable := &packetConnChangeableCloserValidness{PacketConn: ignore}
 
 	if asServer {
 		acceptCancelCert, err := conn.CertificateFunc()

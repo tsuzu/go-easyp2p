@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 )
 
-type PacketConnIgnoreOK struct {
+type packetConnIgnoreOK struct {
 	ch    chan string
 	addrs map[string]struct{}
 	cnt   int
@@ -14,7 +14,7 @@ type PacketConnIgnoreOK struct {
 }
 
 // len(b) must be >=2
-func (wpc *PacketConnIgnoreOK) ReadFrom(b []byte) (int, net.Addr, error) {
+func (wpc *packetConnIgnoreOK) ReadFrom(b []byte) (int, net.Addr, error) {
 	n, addr, err := wpc.PacketConn.ReadFrom(b)
 	if err != nil {
 		return n, addr, err
@@ -44,12 +44,12 @@ func (wpc *PacketConnIgnoreOK) ReadFrom(b []byte) (int, net.Addr, error) {
 	return n, err
 }*/
 
-type PacketConnChangeableCloserStatus struct {
+type packetConnChangeableCloserValidness struct {
 	net.PacketConn
 	status int32
 }
 
-func (p *PacketConnChangeableCloserStatus) SetStatus(enabled bool) {
+func (p *packetConnChangeableCloserValidness) SetStatus(enabled bool) {
 	var v int32
 	if enabled {
 		v = 1
@@ -57,7 +57,7 @@ func (p *PacketConnChangeableCloserStatus) SetStatus(enabled bool) {
 	atomic.StoreInt32(&p.status, v)
 }
 
-func (p *PacketConnChangeableCloserStatus) Close() error {
+func (p *packetConnChangeableCloserValidness) Close() error {
 	if atomic.LoadInt32(&p.status) == 1 {
 		return p.PacketConn.Close()
 	}
