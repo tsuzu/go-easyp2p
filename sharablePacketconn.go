@@ -14,7 +14,7 @@ var errForbiddenAddress = newError("Forbidden Address", false, true)
 var errDisconnected = newError("Disconnected", false, true)
 var errSwitchedToOneAddress = newError("Switched to one address", false, true)
 
-var switchDirectConnectionMessage = errors.New("***swdc***")
+var errSwitchDirectConnectionMessage = errors.New("***swdc***")
 
 type receivedValues struct {
 	b   []byte
@@ -55,7 +55,7 @@ func (spc *sharablePacketConn) Start() {
 				if rv, ok := spc.registered[addr]; ok {
 					rv.recv = append(rv.recv, receivedValues{
 						b:   nil,
-						err: switchDirectConnectionMessage,
+						err: errSwitchDirectConnectionMessage,
 					})
 
 					select {
@@ -219,7 +219,7 @@ func (ipc *childPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error)
 			current := rv.recv[0]
 			rv.recv = rv.recv[1:]
 
-			if current.err == switchDirectConnectionMessage && current.b == nil {
+			if current.err == errSwitchDirectConnectionMessage && current.b == nil {
 				atomic.StoreInt32(&ipc.status, 2)
 
 				ipc.spc.mut.Unlock()

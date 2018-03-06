@@ -17,30 +17,30 @@ import (
 	"github.com/lucas-clemente/quic-go"
 )
 
+// P2PConn is the  type of P2P connection
 type P2PConn struct {
 	RawConn      *net.UDPConn
 	ReliableConn net.Conn
 
 	CertificateFunc    CertificateGeneratorType
-	DiscoverIPTimeout  time.Duration
-	DiscoverIPFunc     DiscoverIPFuncType
+	IPDiscoveryTimeout time.Duration
 	IPDiscoveryServers []string
 	LocalAddresses     []string
 
-	identifier string
+	Identifier string
 	cert       CertificatesType
 	listener   quic.Listener
 }
 
-func NewP2PConn(ipDiscoveryServers []string, discoverIP DiscoverIPFuncType) *P2PConn {
+// NewP2PConn returns a new P2PConn
+func NewP2PConn(ipDiscoveryServers []string) *P2PConn {
 	return &P2PConn{
 		IPDiscoveryServers: ipDiscoveryServers,
-		DiscoverIPFunc:     discoverIP,
-		DiscoverIPTimeout:  5 * time.Second,
+		IPDiscoveryTimeout: 5 * time.Second,
 	}
 }
 
-// If 0, ports will be automatically selected
+// Listen opens a port and returns the local address.  If 0, ports will be automatically selected
 func (conn *P2PConn) Listen(port int) (string, error) {
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: port})
 
@@ -53,6 +53,7 @@ func (conn *P2PConn) Listen(port int) (string, error) {
 	return udp.LocalAddr().String(), nil
 }
 
+// DiscoverIP finds local addresses from STUN servers and network interfaces
 // The first boolean value is whether one address at least is found  or not.
 func (conn *P2PConn) DiscoverIP() (bool, error) {
 	if conn.RawConn == nil {
@@ -66,21 +67,19 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 
 	addrs := make(map[string]struct{})
 
-	if conn.DiscoverIPFunc != nil {
-		for i := range conn.IPDiscoveryServers {
-			server := conn.IPDiscoveryServers[i]
+	for i := range conn.IPDiscoveryServers {
+		server := conn.IPDiscoveryServers[i]
 
-			addr, err := conn.DiscoverIPFunc(server, conn.RawConn, conn.DiscoverIPTimeout)
+		addr, err := discoverIPAddressesWithSTUN(server, conn.RawConn, conn.IPDiscoveryTimeout)
 
-			if err != nil {
-				retErr = append(retErr, err.Error())
+		if err != nil {
+			retErr = append(retErr, err.Error())
 
-				continue
-			}
-
-			addrs[addr] = struct{}{}
-			leastOne = true
+			continue
 		}
+
+		addrs[addr] = struct{}{}
+		leastOne = true
 	}
 
 	ifaces, err := net.Interfaces()
@@ -130,7 +129,9 @@ func (conn *P2PConn) DiscoverIP() (bool, error) {
 	return leastOne, nil
 }
 
-func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context) error {
+// Connect tries to connect to the peer.
+// remoteDescription needs to be given from the other peer
+func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string) error {
 	var remoteDescription Description
 	if err := json.Unmarshal([]byte(remoteDescriptionString), &remoteDescription); err != nil {
 		return err
@@ -278,7 +279,7 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 					accepted = newQuicSessionStream(session)
 
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					if err := accepted.Init(true /*server mode*/, ctx); err != nil {
+					if err := accepted.Init(ctx, true /*server mode*/); err != nil {
 						cancel()
 						return
 					}
@@ -291,13 +292,13 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 					go func() {
 						defer sendHeaderWG.Done()
 						// Send header
-						hbytes := (&P2PHeader{
+						hbytes := (&p2pHeader{
 							Version: P2PVersionLatest,
 						}).GetBytes()
 						accepted.Write(hbytes[:])
 					}()
 
-					var hbytes [P2PHeaderLength]byte
+					var hbytes [p2pHeaderLength]byte
 
 					// Read header
 					if _, err := accepted.Read(hbytes[:]); err != nil {
@@ -307,8 +308,8 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 						return
 					}
 
-					var header *P2PHeader
-					if header, err = ParseP2PHeader(hbytes[:]); err != nil {
+					var header *p2pHeader
+					if header, err = parseP2PHeader(hbytes[:]); err != nil {
 						close(okChan)
 						accepted.Close()
 
@@ -323,20 +324,20 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 
 					sendHeaderWG.Wait()
 
-					b, err := ioutil.ReadAll(&io.LimitedReader{R: accepted, N: int64(IdentifierLength)})
+					b, err := ioutil.ReadAll(&io.LimitedReader{R: accepted, N: int64(identifierLength)})
 					if err != nil {
 						close(okChan)
 						accepted.Close()
 
 						return
 					}
-					if len(b) != IdentifierLength {
+					if len(b) != identifierLength {
 						close(okChan)
 						accepted.Close()
 
 						return
 					}
-					if string(b) != conn.identifier {
+					if string(b) != conn.Identifier {
 						close(okChan)
 						accepted.Close()
 
@@ -420,235 +421,235 @@ func (conn *P2PConn) Connect(remoteDescriptionString string, ctx context.Context
 		}
 
 		return nil
-	} else {
-		finCh := make(chan struct{})
-		triggerCh := make(chan struct{})
+	}
+	finCh := make(chan struct{})
+	triggerCh := make(chan struct{})
 
-		var selected net.Conn
-		var mut sync.Mutex
+	var selected net.Conn
+	var mut sync.Mutex
 
-		config := &tls.Config{
-			RootCAs:      pool,
-			ServerName:   CertificateServerName,
-			Certificates: []tls.Certificate{conn.cert.cert},
+	config := &tls.Config{
+		RootCAs:      pool,
+		ServerName:   CertificateServerName,
+		Certificates: []tls.Certificate{conn.cert.cert},
+	}
+
+	sharable := newSharablePacketConn(changeable)
+
+	sharable.Start()
+	defer sharable.Stop()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ch := make(chan string, len(remoteDescription.LocalAddresses))
+
+		for i := range remoteDescription.LocalAddresses {
+			ch <- remoteDescription.LocalAddresses[i]
 		}
 
-		sharable := newSharablePacketConn(changeable)
-
-		sharable.Start()
-		defer sharable.Stop()
-
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ch := make(chan string, len(remoteDescription.LocalAddresses))
-
-			for i := range remoteDescription.LocalAddresses {
-				ch <- remoteDescription.LocalAddresses[i]
+		for {
+			var addr string
+			select {
+			case addr = <-ch:
+				break
+			case addr = <-ignore.ch:
+				break
+			case <-finCh:
+				return
 			}
+			wg.Add(1)
+			go func(daddr string) {
+				defer wg.Done()
+				pctx, cancel := context.WithCancel(context.Background())
+				go func() {
+					<-finCh
+					cancel()
+				}()
+				defer cancel()
+			FINISH_TRYING:
+				for {
+					finish := func() bool {
+						cpc, err := sharable.Register(daddr)
 
-			for {
-				var addr string
-				select {
-				case addr = <-ch:
-					break
-				case addr = <-ignore.ch:
-					break
-				case <-finCh:
-					return
-				}
-				wg.Add(1)
-				go func(daddr string) {
-					defer wg.Done()
-					pctx, cancel := context.WithCancel(context.Background())
-					go func() {
-						<-finCh
-						cancel()
-					}()
-					defer cancel()
-				FINISH_TRYING:
-					for {
-						finish := func() bool {
-							cpc, err := sharable.Register(daddr)
+						if err != nil {
+							return true
+						}
 
-							if err != nil {
-								return true
-							}
+						session, err := quic.Dial(
+							cpc,
+							cpc.addr,
+							CertificateServerName,
+							config,
+							&quic.Config{
+								MaxIncomingStreams:    0,
+								MaxIncomingUniStreams: 0,
+								KeepAlive:             true,
+							},
+						)
 
-							session, err := quic.Dial(
-								cpc,
-								cpc.addr,
-								CertificateServerName,
-								config,
-								&quic.Config{
-									MaxIncomingStreams:    0,
-									MaxIncomingUniStreams: 0,
-									KeepAlive:             true,
-								},
-							)
+						if err != nil {
+							cpc.Close()
 
-							if err != nil {
-								cpc.Close()
+							return false
+						}
 
-								return false
-							}
+						connected := newQuicSessionStream(session)
 
-							connected := newQuicSessionStream(session)
+						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
+						defer cancel()
 
-							ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
-							defer cancel()
+						if err := connected.Init(ctx, false /*client mode*/); err != nil {
+							return false
+						}
 
-							if err := connected.Init(false /*client mode*/, ctx); err != nil {
-								return false
-							}
-
-							okChan := make(chan struct{})
-							go func() {
+						okChan := make(chan struct{})
+						go func() {
+							select {
+							case <-okChan:
+								return
+							case <-finCh:
 								select {
 								case <-okChan:
-									return
-								case <-finCh:
-									select {
-									case <-okChan:
-									default:
-										connected.SetDeadline(time.Now())
-										connected.Close()
-									}
+								default:
+									connected.SetDeadline(time.Now())
+									connected.Close()
 								}
-							}()
-
-							connected.SetDeadline(time.Now().Add(5 * time.Second))
-
-							var sendHeaderWG sync.WaitGroup
-							sendHeaderWG.Add(1)
-							go func() {
-								defer sendHeaderWG.Done()
-								// Send header
-								hbytes := (&P2PHeader{
-									Version: P2PVersionLatest,
-								}).GetBytes()
-								connected.Write(hbytes[:])
-							}()
-
-							// Read header
-							var hbytes [P2PHeaderLength]byte
-							if _, err := connected.Read(hbytes[:]); err != nil {
-								close(okChan)
-								connected.Close()
-
-								return false
 							}
-
-							var header *P2PHeader
-							if header, err = ParseP2PHeader(hbytes[:]); err != nil {
-								close(okChan)
-								connected.Close()
-
-								return false
-							}
-							if header.Version != P2PVersionLatest {
-								close(okChan)
-								connected.Close()
-
-								return false
-							}
-
-							sendHeaderWG.Wait()
-
-							if _, err := connected.Write([]byte(remoteDescription.Identifier)); err != nil {
-								close(okChan)
-								connected.Close()
-
-								return false
-							}
-
-							connected.SetDeadline(time.Now().Add(5 * time.Second))
-
-							b, err := ioutil.ReadAll(&io.LimitedReader{R: connected, N: int64(IdentifierLength)})
-							if err != nil {
-								close(okChan)
-								connected.Close()
-
-								return false
-							}
-
-							if len(b) != IdentifierLength {
-								close(okChan)
-								connected.Close()
-
-								return false
-							}
-							if string(b) != conn.identifier {
-								close(okChan)
-								connected.Close()
-
-								return false
-							}
-
-							connected.SetDeadline(time.Time{})
-
-							mut.Lock()
-							if selected == nil {
-								selected = connected
-
-								close(okChan)
-								close(triggerCh)
-							} else {
-								connected.Close()
-							}
-							mut.Unlock()
-							return true
 						}()
 
-						if finish {
-							break FINISH_TRYING
+						connected.SetDeadline(time.Now().Add(5 * time.Second))
+
+						var sendHeaderWG sync.WaitGroup
+						sendHeaderWG.Add(1)
+						go func() {
+							defer sendHeaderWG.Done()
+							// Send header
+							hbytes := (&p2pHeader{
+								Version: P2PVersionLatest,
+							}).GetBytes()
+							connected.Write(hbytes[:])
+						}()
+
+						// Read header
+						var hbytes [p2pHeaderLength]byte
+						if _, err := connected.Read(hbytes[:]); err != nil {
+							close(okChan)
+							connected.Close()
+
+							return false
 						}
-						select {
-						case <-finCh:
-							break FINISH_TRYING
-						default:
+
+						var header *p2pHeader
+						if header, err = parseP2PHeader(hbytes[:]); err != nil {
+							close(okChan)
+							connected.Close()
+
+							return false
 						}
+						if header.Version != P2PVersionLatest {
+							close(okChan)
+							connected.Close()
+
+							return false
+						}
+
+						sendHeaderWG.Wait()
+
+						if _, err := connected.Write([]byte(remoteDescription.Identifier)); err != nil {
+							close(okChan)
+							connected.Close()
+
+							return false
+						}
+
+						connected.SetDeadline(time.Now().Add(5 * time.Second))
+
+						b, err := ioutil.ReadAll(&io.LimitedReader{R: connected, N: int64(identifierLength)})
+						if err != nil {
+							close(okChan)
+							connected.Close()
+
+							return false
+						}
+
+						if len(b) != identifierLength {
+							close(okChan)
+							connected.Close()
+
+							return false
+						}
+						if string(b) != conn.Identifier {
+							close(okChan)
+							connected.Close()
+
+							return false
+						}
+
+						connected.SetDeadline(time.Time{})
+
+						mut.Lock()
+						if selected == nil {
+							selected = connected
+
+							close(okChan)
+							close(triggerCh)
+						} else {
+							connected.Close()
+						}
+						mut.Unlock()
+						return true
+					}()
+
+					if finish {
+						break FINISH_TRYING
 					}
-				}(addr)
-			}
-		}()
-
-		select {
-		case <-triggerCh:
-			close(finCh)
-
-		case <-ctx.Done():
-			close(finCh)
-
-			wg.Wait()
-			if selected != nil {
-				selected.Close()
-			}
-
-			return ctx.Err()
+					select {
+					case <-finCh:
+						break FINISH_TRYING
+					default:
+					}
+				}
+			}(addr)
 		}
+	}()
 
-		if _, err := selected.Write([]byte("OK")); err != nil {
-			return err
-		}
+	select {
+	case <-triggerCh:
+		close(finCh)
 
-		conn.ReliableConn = selected
-		sharable.SwitchToOne(selected.RemoteAddr().String())
-		changeable.SetStatus(true)
-		sharable.Stop()
+	case <-ctx.Done():
+		close(finCh)
+
 		wg.Wait()
+		if selected != nil {
+			selected.Close()
+		}
 
-		return nil
+		return ctx.Err()
 	}
+
+	if _, err := selected.Write([]byte("OK")); err != nil {
+		return err
+	}
+
+	conn.ReliableConn = selected
+	sharable.SwitchToOne(selected.RemoteAddr().String())
+	changeable.SetStatus(true)
+	sharable.Stop()
+	wg.Wait()
+
+	return nil
 }
 
+// LocalDescription returns a local description which needs to be passed to the other peer
 func (conn *P2PConn) LocalDescription() (string, error) {
 	if len(conn.LocalAddresses) == 0 {
 		return "", ErrInsufficientLocalAdrdesses
 	}
 
-	conn.identifier = RandomSecureIdentifier()
+	conn.Identifier = randomSecureIdentifier()
 
 	if conn.CertificateFunc == nil {
 		conn.CertificateFunc = NewSelfSignedCertificate
@@ -665,7 +666,7 @@ func (conn *P2PConn) LocalDescription() (string, error) {
 	b, _ := json.Marshal(Description{
 		ProtocolVersion: P2PVersionLatest,
 		LocalAddresses:  conn.LocalAddresses,
-		Identifier:      conn.identifier,
+		Identifier:      conn.Identifier,
 		CAPEM:           cert.caCertPEM,
 	})
 
@@ -688,6 +689,7 @@ func (conn *P2PConn) Write(b []byte) (int, error) {
 	return conn.ReliableConn.Write(b)
 }
 
+// Close closes the connection (sync)
 func (conn *P2PConn) Close() error {
 	if conn.ReliableConn != nil {
 		e := conn.ReliableConn.Close()

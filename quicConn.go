@@ -24,7 +24,7 @@ func newQuicSessionStream(session quic.Session) *quicSessionStream {
 }
 
 // mode: true->server false->client
-func (qss *quicSessionStream) Init(mode bool, ctx context.Context) error {
+func (qss *quicSessionStream) Init(ctx context.Context, mode bool) error {
 	qss.once.Do(func() {
 		fin := make(chan struct{}, 1)
 		go func() {

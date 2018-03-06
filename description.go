@@ -5,11 +5,11 @@ import (
 	"math/big"
 )
 
-const IdentifierLength int = 64
+const identifierLength int = 64
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
-func RandomSecureIdentifier() string {
+func randomSecureIdentifier() string {
 	b := make([]byte, 64)
 	size := big.NewInt(int64(len(letterBytes)))
 	for i := range b {
@@ -19,8 +19,9 @@ func RandomSecureIdentifier() string {
 	return string(b)
 }
 
+// Description is the type of local and remote description passed between two peers
 type Description struct {
-	ProtocolVersion uint32
+	ProtocolVersion P2PVersionType
 	LocalAddresses  []string
 	Identifier      string
 	CAPEM           []byte

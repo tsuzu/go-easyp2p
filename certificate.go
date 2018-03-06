@@ -11,16 +11,20 @@ import (
 	"time"
 )
 
+// CertificateServerName is the default server name for the quic server
 const CertificateServerName = "easyp2p.go"
 
-// dns names in the certificate of the server must be easyp2p.go
+// CertificateGeneratorType is the type of functions which create certificates.
+// DNS names in the certificate of the server must be CertificateServerName(easyp2p.go)
 type CertificateGeneratorType func() (CertificatesType, error)
 
+// CertificatesType needs to contain a certificate of CA as PEM and a certificate created with the CA
 type CertificatesType struct {
 	caCertPEM []byte
 	cert      tls.Certificate
 }
 
+// NewSelfSignedCertificate is the default function of CertificateGeneratorType
 func NewSelfSignedCertificate() (out CertificatesType, retErr error) {
 	ca := &x509.Certificate{
 		SerialNumber: new(big.Int).SetInt64(0),

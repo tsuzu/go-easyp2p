@@ -1,17 +1,12 @@
 package easyp2p
 
 import (
-	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/anacrolix/utp"
 	"github.com/gortc/stun"
 )
-
-type DiscoverIPFuncType func(string, net.PacketConn, time.Duration) (string, error)
 
 type connectionNopCloser struct {
 	addr net.Addr
@@ -52,7 +47,7 @@ func newConnectionNopCloser(conn net.PacketConn, addr string) (stun.Connection, 
 	}, nil
 }
 
-func DiscoverIPWithSTUN(addr string, conn net.PacketConn, timeout time.Duration) (string, error) {
+func discoverIPAddressesWithSTUN(addr string, conn net.PacketConn, timeout time.Duration) (string, error) {
 	c, err := newConnectionNopCloser(conn, addr)
 
 	if err != nil {
@@ -101,51 +96,4 @@ func DiscoverIPWithSTUN(addr string, conn net.PacketConn, timeout time.Duration)
 	}
 
 	return res, nil
-}
-
-// DiscoverIPSimple  You can use this with RunDiscoverIPSimpleServer(), but this is deprecated
-func DiscoverIPSimple(addr string, conn net.PacketConn, timeout time.Duration) (string, error) {
-	s, err := utp.NewSocketFromPacketConnNoClose(conn)
-
-	if err != nil {
-		return "", err
-
-	}
-	defer s.CloseNow()
-
-	c, err := s.Dial(addr)
-
-	if err != nil {
-		return "", err
-	}
-
-	defer c.Close()
-
-	c.SetDeadline(time.Now().Add(timeout))
-
-	c.Write([]byte(fmt.Sprintf("%s %s", IPDiscoveryRequestHeader, IPDiscoveryVersion)))
-
-	b := make([]byte, 1024)
-	n, err := c.Read(b)
-
-	if err != nil {
-		return "", err
-	}
-
-	b = b[:n]
-
-	arr := strings.Split(string(b), " ")
-
-	if len(arr) != 2 {
-		return "", ErrUnknownProtocol
-	}
-
-	switch arr[0] {
-	case IPDiscoveryResponseHeaderOK:
-		return arr[1], nil
-	case IPDiscoveryResponseHeaderProcotolError:
-		return "", ErrUnknownProtocol
-	default:
-		return "", ErrUnknownProtocol
-	}
 }
