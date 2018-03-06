@@ -27,7 +27,7 @@
 
 [[constraint]]
   branch = "master"
-  name = "github.com/anacrolix/utp"
+  name = "github.com/lucas-clemente/quic-go"
 
 [[constraint]]
   name = "github.com/gortc/stun"
