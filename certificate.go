@@ -20,8 +20,8 @@ type CertificateGeneratorType func() (CertificatesType, error)
 
 // CertificatesType needs to contain a certificate of CA as PEM and a certificate created with the CA
 type CertificatesType struct {
-	caCertPEM []byte
-	cert      tls.Certificate
+	CACertPEM []byte
+	Cert      tls.Certificate
 }
 
 // NewSelfSignedCertificate is the default function of CertificateGeneratorType
@@ -48,7 +48,7 @@ func NewSelfSignedCertificate() (out CertificatesType, retErr error) {
 		return
 	}
 
-	out.caCertPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caX509})
+	out.CACertPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caX509})
 	//caKeyOut := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(caPriv)})
 
 	template := &x509.Certificate{
@@ -76,7 +76,7 @@ func NewSelfSignedCertificate() (out CertificatesType, retErr error) {
 	certOut := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 	keyOut := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
 
-	out.cert, retErr = tls.X509KeyPair(certOut, keyOut)
+	out.Cert, retErr = tls.X509KeyPair(certOut, keyOut)
 
 	return
 }

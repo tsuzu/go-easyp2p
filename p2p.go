@@ -146,7 +146,7 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 		return ErrInvalidCACertificate
 	}
 
-	asServer := bytes.Compare(remoteDescription.CAPEM, conn.cert.caCertPEM) > 0
+	asServer := bytes.Compare(remoteDescription.CAPEM, conn.cert.CACertPEM) > 0
 
 	ignore := &packetConnIgnoreOK{
 		PacketConn: conn.RawConn,
@@ -170,12 +170,12 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 			return err
 		}
 
-		if !pool.AppendCertsFromPEM(acceptCancelCert.caCertPEM) {
+		if !pool.AppendCertsFromPEM(acceptCancelCert.CACertPEM) {
 			return ErrInvalidCACertificate
 		}
 
 		config := &tls.Config{
-			Certificates: []tls.Certificate{conn.cert.cert},
+			Certificates: []tls.Certificate{conn.cert.Cert},
 			ClientCAs:    pool,
 			ClientAuth:   tls.RequireAndVerifyClientCert,
 		}
@@ -276,11 +276,13 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 						}
 					}()
 
-					accepted = newQuicSessionStream(session)
+					accepted = newquicSessionStream(session)
 
 					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					if err := accepted.Init(ctx, true /*server mode*/); err != nil {
+					if err := accepted.init(ctx, true /*server mode*/); err != nil {
 						cancel()
+
+						accepted.CloseNow()
 						return
 					}
 					cancel()
@@ -303,7 +305,7 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 					// Read header
 					if _, err := accepted.Read(hbytes[:]); err != nil {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
@@ -311,13 +313,13 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 					var header *p2pHeader
 					if header, err = parseP2PHeader(hbytes[:]); err != nil {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
 					if header.Version != P2PVersionLatest {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
@@ -327,26 +329,26 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 					b, err := ioutil.ReadAll(&io.LimitedReader{R: accepted, N: int64(identifierLength)})
 					if err != nil {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
 					if len(b) != identifierLength {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
 					if string(b) != conn.Identifier {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
 
 					if _, err := accepted.Write([]byte(remoteDescription.Identifier)); err != nil {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
@@ -356,7 +358,7 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 
 					if err != nil {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 
 						return
 					}
@@ -366,14 +368,18 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 
 					if string(b) == "OK" {
 						mut.Lock()
-						conn.ReliableConn = accepted
+
+						if conn.ReliableConn == nil {
+							conn.ReliableConn = accepted
+
+							close(okChan)
+							close(finCh)
+						}
 						mut.Unlock()
 
-						close(okChan)
-						close(finCh)
 					} else {
 						close(okChan)
-						accepted.Close()
+						accepted.CloseNow()
 					}
 				}()
 			}
@@ -382,15 +388,15 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 		case <-finCh:
 
 			// Stop accepting TODO: change into a smarter way
-			go func() {
-				defer filtered.setAllowedAddress(conn.ReliableConn.RemoteAddr().String())
+			go func(allowed string) {
+				defer filtered.setAllowedAddress(allowed)
 				addr := listener.Addr().String()
 				port := addr[strings.LastIndex(addr, ":")+1:]
 
 				c, err := quic.DialAddr(
 					"localhost:"+port,
 					&tls.Config{
-						Certificates:       []tls.Certificate{acceptCancelCert.cert},
+						Certificates:       []tls.Certificate{acceptCancelCert.Cert},
 						InsecureSkipVerify: true,
 					},
 					&quic.Config{
@@ -404,7 +410,7 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 				if err == nil {
 					c.Close(nil)
 				}
-			}()
+			}(conn.ReliableConn.RemoteAddr().String())
 
 			wg.Wait()
 			changeable.SetStatus(true)
@@ -413,15 +419,20 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 		case <-ctx.Done():
 			listener.Close()
 			wg.Wait()
+
+			mut.Lock()
 			if conn.ReliableConn != nil {
 				conn.ReliableConn.Close()
+				conn.ReliableConn = nil
 			}
+			mut.Unlock()
 
 			return ctx.Err()
 		}
 
 		return nil
 	}
+
 	finCh := make(chan struct{})
 	triggerCh := make(chan struct{})
 
@@ -431,7 +442,7 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 	config := &tls.Config{
 		RootCAs:      pool,
 		ServerName:   CertificateServerName,
-		Certificates: []tls.Certificate{conn.cert.cert},
+		Certificates: []tls.Certificate{conn.cert.Cert},
 	}
 
 	sharable := newSharablePacketConn(changeable)
@@ -471,6 +482,8 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 			FINISH_TRYING:
 				for {
 					finish := func() bool {
+						okChan := make(chan struct{})
+
 						cpc, err := sharable.Register(daddr)
 
 						if err != nil {
@@ -485,6 +498,7 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 							&quic.Config{
 								MaxIncomingStreams:    0,
 								MaxIncomingUniStreams: 0,
+								HandshakeTimeout:      5 * time.Second,
 								KeepAlive:             true,
 							},
 						)
@@ -495,16 +509,6 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 							return false
 						}
 
-						connected := newQuicSessionStream(session)
-
-						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
-						defer cancel()
-
-						if err := connected.Init(ctx, false /*client mode*/); err != nil {
-							return false
-						}
-
-						okChan := make(chan struct{})
 						go func() {
 							select {
 							case <-okChan:
@@ -513,11 +517,21 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 								select {
 								case <-okChan:
 								default:
-									connected.SetDeadline(time.Now())
-									connected.Close()
+									session.Close(nil)
 								}
 							}
 						}()
+
+						connected := newquicSessionStream(session)
+
+						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
+						defer cancel()
+
+						if err := connected.init(ctx, false /*client mode*/); err != nil {
+							cpc.Close()
+
+							return false
+						}
 
 						connected.SetDeadline(time.Now().Add(5 * time.Second))
 
@@ -623,9 +637,11 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 		close(finCh)
 
 		wg.Wait()
+		mut.Lock()
 		if selected != nil {
 			selected.Close()
 		}
+		mut.Unlock()
 
 		return ctx.Err()
 	}
@@ -637,7 +653,6 @@ func (conn *P2PConn) Connect(ctx context.Context, remoteDescriptionString string
 	conn.ReliableConn = selected
 	sharable.SwitchToOne(selected.RemoteAddr().String())
 	changeable.SetStatus(true)
-	sharable.Stop()
 	wg.Wait()
 
 	return nil
@@ -667,7 +682,7 @@ func (conn *P2PConn) LocalDescription() (string, error) {
 		ProtocolVersion: P2PVersionLatest,
 		LocalAddresses:  conn.LocalAddresses,
 		Identifier:      conn.Identifier,
-		CAPEM:           cert.caCertPEM,
+		CAPEM:           cert.CACertPEM,
 	})
 
 	return string(b), nil
@@ -675,7 +690,7 @@ func (conn *P2PConn) LocalDescription() (string, error) {
 
 func (conn *P2PConn) Read(b []byte) (int, error) {
 	if conn.ReliableConn == nil {
-		return 0, ErrNotConnected
+		return 0, ErrDisconnected
 	}
 
 	return conn.ReliableConn.Read(b)
@@ -683,7 +698,7 @@ func (conn *P2PConn) Read(b []byte) (int, error) {
 
 func (conn *P2PConn) Write(b []byte) (int, error) {
 	if conn.ReliableConn == nil {
-		return 0, ErrNotConnected
+		return 0, ErrDisconnected
 	}
 
 	return conn.ReliableConn.Write(b)

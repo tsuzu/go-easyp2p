@@ -5,8 +5,8 @@ import (
 	"net"
 )
 
-// ErrNotConnected is returned when packets are sent/received while connection is not connected.
-var ErrNotConnected = newError("Not connected", false, true)
+// ErrDisconnected is returned when the connection is closed or not established.
+var ErrDisconnected = newError("Disconnected", false, true)
 
 // ErrInsufficientLocalAdrdesses is returned when DiscoverIP() can find no addresses
 var ErrInsufficientLocalAdrdesses = newError("Insufficient local addresses", false, true)
@@ -16,6 +16,14 @@ var ErrInvalidCACertificate = newError("Invalid CA Certificate", false, true)
 
 // ErrDifferentProtocol is returned when protocols don't match.
 var ErrDifferentProtocol = newError("Different protocol", false, true)
+
+// for sharablePacketConn
+
+var errNotImplemented = newError("Not Implemented", false, true)
+var errAlreadyRegistered = newError("Already Registered", false, false)
+var errForbiddenAddress = newError("Forbidden Address", false, true)
+var errSwitchedToOneAddress = newError("Switched to one address", false, true)
+var errSwitchDirectConnectionMessage = errors.New("Switched to direct connection message")
 
 func newError(msg string, timeout, temporary bool) net.Error {
 	return &NetError{

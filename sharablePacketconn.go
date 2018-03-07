@@ -1,20 +1,11 @@
 package easyp2p
 
 import (
-	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-var errNotImplemented = newError("Not Implemented", false, true)
-var errAlreadyRegistered = newError("Already Registered", false, false)
-var errForbiddenAddress = newError("Forbidden Address", false, true)
-var errDisconnected = newError("Disconnected", false, true)
-var errSwitchedToOneAddress = newError("Switched to one address", false, true)
-
-var errSwitchDirectConnectionMessage = errors.New("***swdc***")
 
 type receivedValues struct {
 	b   []byte
@@ -193,7 +184,7 @@ func (ipc *childPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error)
 	for {
 		switch atomic.LoadInt32(&ipc.status) {
 		case 1:
-			return 0, nil, errDisconnected
+			return 0, nil, ErrDisconnected
 		case 2:
 			for {
 				n, addr, err = ipc.spc.pconn.ReadFrom(b)
@@ -213,7 +204,7 @@ func (ipc *childPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error)
 		if !ok {
 			ipc.spc.mut.Unlock()
 
-			return 0, nil, errDisconnected
+			return 0, nil, ErrDisconnected
 		}
 		if len(rv.recv) != 0 {
 			current := rv.recv[0]
@@ -249,7 +240,7 @@ func (ipc *childPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) 
 	}
 
 	if atomic.LoadInt32(&ipc.status) == 1 {
-		return 0, errDisconnected
+		return 0, ErrDisconnected
 	}
 
 	return ipc.spc.pconn.WriteTo(b, addr)

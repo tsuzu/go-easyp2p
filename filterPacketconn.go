@@ -23,15 +23,17 @@ func (fpc *filterPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		n, addr, err := fpc.PacketConn.ReadFrom(b)
 
 		fpc.mut.RLock()
-		if len(fpc.allowed) == 0 || addr.String() == fpc.allowed {
-			fpc.mut.RUnlock()
+		allowed := fpc.allowed
+		fpc.mut.RUnlock()
+
+		if len(allowed) == 0 || (addr != nil && addr.String() == allowed) {
 			return n, addr, err
 		}
-		fpc.mut.RUnlock()
 
 		if err != nil {
 			return 0, nil, err
 		}
+
 	}
 }
 

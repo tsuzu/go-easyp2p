@@ -19,7 +19,7 @@ func randomSecureIdentifier() string {
 	return string(b)
 }
 
-// Description is the type of local and remote description passed between two peers
+// Description is the type of local and remote description given between two peers
 type Description struct {
 	ProtocolVersion P2PVersionType
 	LocalAddresses  []string
