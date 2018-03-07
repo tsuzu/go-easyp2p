@@ -90,10 +90,9 @@ func (qss *quicSessionStream) read(b []byte) (n int, closed bool, err error) {
 
 func (qss *quicSessionStream) readWorker() (closed bool) {
 	qss.readDeadlineMut.Lock()
-	if time.Now().Before(qss.readDeadline) {
+	if (qss.readDeadline != time.Time{} && time.Now().Before(qss.readDeadline)) {
 		qss.readDeadline = time.Now().Add(1 * time.Second)
 		qss.stream.SetReadDeadline(qss.readDeadline)
-
 	}
 	qss.readDeadlineMut.Unlock()
 
@@ -189,7 +188,7 @@ func (qss *quicSessionStream) SetDeadline(t time.Time) error {
 
 func (qss *quicSessionStream) SetReadDeadline(t time.Time) error {
 	qss.readDeadlineMut.Lock()
-	qss.readDeadline = time.Now().Add(1 * time.Second)
+	qss.readDeadline = t
 	err := qss.stream.SetReadDeadline(qss.readDeadline)
 	qss.readDeadlineMut.Unlock()
 
