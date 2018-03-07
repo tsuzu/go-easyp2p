@@ -279,12 +279,15 @@ func (conn *P2PConn) connectToServer(ctx context.Context, ignore *packetConnIgno
 			wg.Add(1)
 			go func(daddr string) {
 				defer wg.Done()
+
 				pctx, cancel := context.WithCancel(context.Background())
 				go func() {
 					<-finCh
 					cancel()
 				}()
 				defer cancel()
+
+				retryingInterval := InitialRetryingInterval
 			FINISH_TRYING:
 				for {
 					finish := func() bool {
@@ -425,11 +428,18 @@ func (conn *P2PConn) connectToServer(ctx context.Context, ignore *packetConnIgno
 					if finish {
 						break FINISH_TRYING
 					}
+					timer := time.NewTimer(retryingInterval)
+
 					select {
+					case <-timer.C:
+
 					case <-finCh:
 						break FINISH_TRYING
-					default:
 					}
+
+					timer.Stop()
+
+					retryingInterval *= RetryingIntervalMultipied
 				}
 			}(addr)
 		}
