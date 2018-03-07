@@ -94,6 +94,8 @@ func (spc *sharablePacketConn) Start() {
 				}
 
 				spc.mut.Unlock()
+
+				return
 			default:
 			}
 			b := make([]byte, 65535)
@@ -104,24 +106,26 @@ func (spc *sharablePacketConn) Start() {
 					if !e.Temporary() {
 						return
 					}
+				} else {
+					return
 				}
-			}
+			} else if addr != nil {
+				b = b[:n]
+				spc.mut.Lock()
 
-			b = b[:n]
-			spc.mut.Lock()
+				if rv, ok := spc.registered[addr.String()]; ok {
+					rv.recv = append(rv.recv, receivedValues{
+						b:   b,
+						err: err,
+					})
 
-			if rv, ok := spc.registered[addr.String()]; ok {
-				rv.recv = append(rv.recv, receivedValues{
-					b:   b,
-					err: err,
-				})
-
-				select {
-				case rv.wg <- struct{}{}:
-				default:
+					select {
+					case rv.wg <- struct{}{}:
+					default:
+					}
 				}
+				spc.mut.Unlock()
 			}
-			spc.mut.Unlock()
 		}
 	}()
 }

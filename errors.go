@@ -6,23 +6,23 @@ import (
 )
 
 // ErrDisconnected is returned when the connection is closed or not established.
-var ErrDisconnected = newError("Disconnected", false, true)
+var ErrDisconnected = newError("Disconnected", false, false)
 
 // ErrInsufficientLocalAdrdesses is returned when DiscoverIP() can find no addresses
-var ErrInsufficientLocalAdrdesses = newError("Insufficient local addresses", false, true)
+var ErrInsufficientLocalAdrdesses = newError("Insufficient local addresses", false, false)
 
 // ErrInvalidCACertificate is returned when given CA certificates is invalid
-var ErrInvalidCACertificate = newError("Invalid CA Certificate", false, true)
+var ErrInvalidCACertificate = newError("Invalid CA Certificate", false, false)
 
 // ErrDifferentProtocol is returned when protocols don't match.
-var ErrDifferentProtocol = newError("Different protocol", false, true)
+var ErrDifferentProtocol = newError("Different protocol", false, false)
 
 // for sharablePacketConn
 
-var errNotImplemented = newError("Not Implemented", false, true)
-var errAlreadyRegistered = newError("Already Registered", false, false)
-var errForbiddenAddress = newError("Forbidden Address", false, true)
-var errSwitchedToOneAddress = newError("Switched to one address", false, true)
+var errNotImplemented = newError("Not Implemented", false, false)
+var errAlreadyRegistered = newError("Already Registered", false, true)
+var errForbiddenAddress = newError("Forbidden Address", false, false)
+var errSwitchedToOneAddress = newError("Switched to one address", false, false)
 var errSwitchDirectConnectionMessage = errors.New("Switched to direct connection message")
 
 func newError(msg string, timeout, temporary bool) net.Error {

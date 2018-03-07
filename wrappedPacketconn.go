@@ -3,6 +3,7 @@ package easyp2p
 import (
 	"net"
 	"sync/atomic"
+	"time"
 )
 
 type packetConnIgnoreOK struct {
@@ -44,23 +45,89 @@ func (wpc *packetConnIgnoreOK) ReadFrom(b []byte) (int, net.Addr, error) {
 	return n, err
 }*/
 
-type packetConnChangeableCloserValidness struct {
-	net.PacketConn
-	status int32
+type validnessStatus int32
+
+const (
+	validnessEnabled validnessStatus = iota
+	validnessCloserDisabled
+	validnessDisabled
+)
+
+type packetConnChangeableValidness struct {
+	PacketConn net.PacketConn
+	status     int32
 }
 
-func (p *packetConnChangeableCloserValidness) SetStatus(enabled bool) {
-	var v int32
-	if enabled {
-		v = 1
+func (p *packetConnChangeableValidness) SetStatus(status validnessStatus) {
+	atomic.StoreInt32(&p.status, int32(status))
+}
+
+func (p *packetConnChangeableValidness) ReadFrom(b []byte) (int, net.Addr, error) {
+	switch validnessStatus(atomic.LoadInt32(&p.status)) {
+	case validnessDisabled:
+		return 0, nil, ErrDisconnected
+	default:
 	}
-	atomic.StoreInt32(&p.status, v)
+
+	return p.PacketConn.ReadFrom(b)
 }
 
-func (p *packetConnChangeableCloserValidness) Close() error {
-	if atomic.LoadInt32(&p.status) == 1 {
+func (p *packetConnChangeableValidness) WriteTo(b []byte, addr net.Addr) (int, error) {
+	switch validnessStatus(atomic.LoadInt32(&p.status)) {
+	case validnessDisabled:
+		return 0, ErrDisconnected
+	default:
+	}
+
+	return p.PacketConn.WriteTo(b, addr)
+}
+
+func (p *packetConnChangeableValidness) Close() error {
+	switch validnessStatus(atomic.LoadInt32(&p.status)) {
+	case validnessEnabled:
 		return p.PacketConn.Close()
+	default:
 	}
 
 	return nil
+}
+
+func (p *packetConnChangeableValidness) LocalAddr() net.Addr {
+	switch validnessStatus(atomic.LoadInt32(&p.status)) {
+	case validnessDisabled:
+		return nil
+	default:
+	}
+
+	return p.PacketConn.LocalAddr()
+}
+
+func (p *packetConnChangeableValidness) SetDeadline(t time.Time) error {
+	switch validnessStatus(atomic.LoadInt32(&p.status)) {
+	case validnessDisabled:
+		return nil
+	default:
+	}
+
+	return p.PacketConn.SetDeadline(t)
+}
+
+func (p *packetConnChangeableValidness) SetReadDeadline(t time.Time) error {
+	switch validnessStatus(atomic.LoadInt32(&p.status)) {
+	case validnessDisabled:
+		return nil
+	default:
+	}
+
+	return p.PacketConn.SetReadDeadline(t)
+}
+
+func (p *packetConnChangeableValidness) SetWriteDeadline(t time.Time) error {
+	switch validnessStatus(atomic.LoadInt32(&p.status)) {
+	case validnessDisabled:
+		return nil
+	default:
+	}
+
+	return p.PacketConn.SetWriteDeadline(t)
 }
