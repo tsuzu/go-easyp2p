@@ -11,7 +11,7 @@ var ErrDisconnected = newError("Disconnected", false, false)
 // ErrInsufficientLocalAdrdesses is returned when DiscoverIP() can find no addresses
 var ErrInsufficientLocalAdrdesses = newError("Insufficient local addresses", false, false)
 
-// ErrInvalidCACertificate is returned when given CA certificates is invalid
+// ErrInvalidCACertificate is returned when the given CA certificate is invalid
 var ErrInvalidCACertificate = newError("Invalid CA Certificate", false, false)
 
 // ErrDifferentProtocol is returned when protocols don't match.
