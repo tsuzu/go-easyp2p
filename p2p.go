@@ -439,7 +439,7 @@ func (conn *P2PConn) connectToServer(ctx context.Context, ignore *packetConnIgno
 
 					timer.Stop()
 
-					retryingInterval *= RetryingIntervalMultipied
+					retryingInterval *= RetryingIntervalMultiplied
 				}
 			}(addr)
 		}
