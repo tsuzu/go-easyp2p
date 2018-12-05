@@ -32,15 +32,13 @@ func newquicSessionStream(session quic.Session) *quicSessionStream {
 	}
 }
 
-// mode: true->server false->client
-// this must be called only once
-func (qss *quicSessionStream) init(ctx context.Context, mode bool) error {
+func (qss *quicSessionStream) init(ctx context.Context, mode connectionMode) error {
 	qss.once.Do(func() {
 		fin := make(chan struct{}, 1)
 		go func() {
 			select {
 			case <-ctx.Done():
-				qss.session.Close(ctx.Err())
+				qss.session.Close()
 			case <-fin:
 				return
 			}
@@ -48,9 +46,9 @@ func (qss *quicSessionStream) init(ctx context.Context, mode bool) error {
 
 		var stream quic.Stream
 		var err error
-		if mode {
+		if mode == serverMode {
 			stream, err = qss.session.AcceptStream()
-		} else {
+		} else if mode == clientMode {
 			stream, err = qss.session.OpenStream()
 		}
 		close(fin)
@@ -158,7 +156,7 @@ func (qss *quicSessionStream) Close() error {
 	}
 
 	if qss.session != nil {
-		if err := qss.session.Close(nil); err != nil {
+		if err := qss.session.Close(); err != nil {
 			return err
 		}
 	}
@@ -168,7 +166,7 @@ func (qss *quicSessionStream) Close() error {
 
 // CloseNow closes the connection abruptly
 func (qss *quicSessionStream) CloseNow() {
-	qss.session.Close(nil)
+	qss.session.Close()
 }
 
 func (qss *quicSessionStream) LocalAddr() net.Addr {

@@ -13,6 +13,8 @@ github.com/lucas-clemente/fnv128a v0.0.0-20160504152609-393af48d3916 h1:BBilz74E
 github.com/lucas-clemente/fnv128a v0.0.0-20160504152609-393af48d3916/go.mod h1:31qAbuTRFIJASrl34sBxFDAVzDF22dO/GV7Lxw+Kmi8=
 github.com/lucas-clemente/quic-go v0.0.0-20180306025856-2d560645f79a h1:RukNZ5IDWN+URW/db9pgmHKPtnn+gjl6Q/WUJ0Yzn9I=
 github.com/lucas-clemente/quic-go v0.0.0-20180306025856-2d560645f79a/go.mod h1:wuD+2XqEx8G9jtwx5ou2BEYBsE+whgQmlj0Vz/77PrY=
+github.com/lucas-clemente/quic-go v0.10.0 h1:xEF+pSHYAOcu+U10Meunf+DTtc8vhQDRqlA0BJ6hufc=
+github.com/lucas-clemente/quic-go v0.10.0/go.mod h1:wuD+2XqEx8G9jtwx5ou2BEYBsE+whgQmlj0Vz/77PrY=
 github.com/lucas-clemente/quic-go-certificates v0.0.0-20160823095156-d2f86524cced h1:zqEC1GJZFbGZA0tRyNZqRjep92K5fujFtFsu5ZW7Aug=
 github.com/lucas-clemente/quic-go-certificates v0.0.0-20160823095156-d2f86524cced/go.mod h1:NCcRLrOTZbzhZvixZLlERbJtDtYsmMw8Jc4vS8Z0g58=
 golang.org/x/crypto v0.0.0-20180228161326-91a49db82a88 h1:jLkAo/qlT9whgCLYC5GAJ9kcKrv3Wj8VCc4N+KJ4wpw=

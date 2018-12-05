@@ -398,7 +398,7 @@ func (conn *P2PConn) connectToServer(ctx context.Context, ignore *packetConnIgno
 								select {
 								case <-okChan:
 								default:
-									session.Close(nil)
+									session.Close()
 								}
 							}
 						}()
@@ -408,7 +408,7 @@ func (conn *P2PConn) connectToServer(ctx context.Context, ignore *packetConnIgno
 						ctx, cancel := context.WithTimeout(pctx, 5*time.Second)
 						defer cancel()
 
-						if err := connected.init(ctx, false /*client mode*/); err != nil {
+						if err := connected.init(ctx, clientMode); err != nil {
 							connected.Close()
 
 							return false
@@ -613,7 +613,7 @@ func (conn *P2PConn) connectToClient(ctx context.Context, changeable *packetConn
 
 				select {
 				case <-finCh:
-					session.Close(nil)
+					session.Close()
 					return
 				default:
 				}
@@ -632,7 +632,7 @@ func (conn *P2PConn) connectToClient(ctx context.Context, changeable *packetConn
 				}
 			case <-finCh:
 				if session != nil {
-					session.Close(nil)
+					session.Close()
 				}
 				return
 			}
@@ -664,7 +664,7 @@ func (conn *P2PConn) connectToClient(ctx context.Context, changeable *packetConn
 				accepted = newquicSessionStream(session)
 
 				ictx, cancel := context.WithTimeout(ctx, 3*time.Second)
-				if err := accepted.init(ictx, true /*server mode*/); err != nil {
+				if err := accepted.init(ictx, serverMode); err != nil {
 					cancel()
 
 					accepted.CloseNow()
@@ -792,7 +792,7 @@ func (conn *P2PConn) connectToClient(ctx context.Context, changeable *packetConn
 			)
 
 			if err == nil {
-				c.Close(nil)
+				c.Close()
 			} else {
 				log.Println(err)
 			}
