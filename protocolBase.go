@@ -56,12 +56,6 @@ func (h *p2pHeader) GetBytes() [p2pHeaderLength]byte {
 
 	binary.BigEndian.PutUint32(b[:], uint32(h.Version))
 
-	/*var flag byte = 0
-	if h.Encrypted {
-		flag = flag | encryptedFlag
-	}
-	b[4] = flag*/
-
 	return b
 }
 

@@ -461,7 +461,7 @@ func (conn *P2PConn) connectToServer(ctx context.Context, ignore *packetConnIgno
 
 						connected.SetDeadline(time.Now().Add(5 * time.Second))
 
-						b, err := ioutil.ReadAll(&io.LimitedReader{R: connected, N: int64(identifierLength)})
+						b, err := ioutil.ReadAll(io.LimitReader(connected, int64(identifierLength)))
 						if err != nil {
 							close(okChan)
 							connected.Close()

@@ -11,6 +11,6 @@ const RetryingIntervalMultiplied = time.Duration(2)
 type connectionMode bool
 
 const (
-	serverMode connectionMode = iota == 0
+	serverMode connectionMode = iota == 1
 	clientMode
 )
